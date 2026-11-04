@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ariadne — code graph intelligence</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/styles.css?v=9dbf691e35">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.30.2/cytoscape.min.js" defer></script>
+  <script src="/app.js?v=c198dfa3c0" defer></script>
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <svg width="26" height="26" viewBox="0 0 32 32" aria-hidden="true"><use href="/favicon.svg#mark"/></svg>
+    <span>Ariadne</span>
+  </div>
+  <form id="index-form" class="index-form" autocomplete="off">
+    <input id="repo-url" type="text" placeholder="https://github.com/owner/repo" aria-label="Repository URL" required maxlength="300">
+    <input id="repo-ref" type="text" placeholder="branch (optional)" aria-label="Branch or tag" maxlength="200">
+    <input id="index-token" type="password" placeholder="index token" aria-label="Index token" hidden>
+    <button id="index-btn" type="submit" class="primary" title="Download, parse and store this repository's code graph">Index</button>
+  </form>
+  <label class="repo-pick">
+    <span>Repository</span>
+    <select id="repo-select" aria-label="Indexed repository"><option value="">—</option></select>
+  </label>
+  <button id="repo-delete" class="ghost danger" type="button" disabled title="Delete the selected repository's graph">Delete</button>
+  <div id="status-badges" class="badges"></div>
+</header>
+
+<section id="progress" class="progress" hidden>
+  <div class="progress-head">
+    <strong id="progress-title">Indexing…</strong>
+    <button id="progress-close" class="ghost" type="button" aria-label="Hide log">✕</button>
+  </div>
+  <div class="bar"><div id="progress-bar"></div></div>
+  <ol id="progress-log"></ol>
+</section>
+
+<main class="layout">
+  <aside class="panel left">
+    <section class="card" id="overview-card">
+      <h2>Overview</h2>
+      <div id="overview" class="muted">Index a repository or pick one above.</div>
+    </section>
+    <section class="card grow">
+      <h2>Search</h2>
+      <div class="search-row">
+        <input id="search-input" type="search" placeholder="file, class or function…" maxlength="200" aria-label="Search symbols">
+        <select id="search-kind" aria-label="Kind">
+          <option value="all">All</option><option value="function">Functions</option>
+          <option value="class">Classes</option><option value="file">Files</option><option value="package">Packages</option>
+        </select>
+      </div>
+      <ul id="search-results" class="results"></ul>
+    </section>
+  </aside>
+
+  <section class="panel center">
+    <div class="graph-toolbar">
+      <div class="rels" id="rel-filters">
+        <label><input type="checkbox" value="CALLS" checked> calls</label>
+        <label><input type="checkbox" value="IMPORTS" checked> imports</label>
+        <label><input type="checkbox" value="EXTENDS" checked> extends</label>
+        <label><input type="checkbox" value="IMPLEMENTS" checked> implements</label>
+        <label><input type="checkbox" value="DEFINES" checked> defines</label>
+        <label><input type="checkbox" value="DEPENDS_ON"> packages</label>
+      </div>
+      <select id="direction" aria-label="Direction" title="Edge direction relative to the selected node">
+        <option value="both">both directions</option><option value="out">outgoing</option><option value="in">incoming</option>
+      </select>
+      <button id="graph-home" class="ghost" type="button" title="Show the repository graph" disabled>Overview</button>
+      <button id="fit-btn" class="ghost" type="button" title="Zoom and pan to show every node" disabled>Fit</button>
+    </div>
+    <div class="graph-caption-row small">
+      <div id="graph-caption" class="graph-caption muted"></div>
+      <span id="graph-labels" class="graph-labels" aria-live="polite" hidden></span>
+    </div>
+    <div id="graph" class="graph" aria-label="Code graph">
+      <!-- Inline size: the canvas must never depend on the stylesheet for its height. -->
+      <div id="graph-canvas" class="graph-canvas" style="position:absolute;inset:0"></div>
+      <div id="graph-status" class="graph-status" role="status" aria-live="polite">Pick a repository to see its code graph.</div>
+      <div id="graph-tip" class="graph-tip" role="tooltip" hidden></div>
+    </div>
+    <div class="legend">
+      <span><i class="dot file"></i>File</span><span><i class="dot class"></i>Class</span>
+      <span><i class="dot function"></i>Function</span><span><i class="dot package"></i>Package</span>
+      <span><i class="edge calls"></i>calls</span><span><i class="edge extends"></i>extends / implements</span>
+      <span><i class="edge imports"></i>imports / packages</span><span><i class="edge defines"></i>defines</span>
+      <span><i class="line solid"></i>resolved</span><span><i class="line dashed"></i>inferred</span><span><i class="line dotted"></i>ambiguous</span>
+      <span class="muted">Hover a node for its full name and edge types.</span>
+    </div>
+  </section>
+
+  <aside class="panel right">
+    <nav class="tabs" role="tablist" aria-label="Analysis">
+      <button role="tab" type="button" id="tab-ask" data-tab="ask" class="active" aria-selected="true" aria-controls="pane-ask">Ask</button>
+      <button role="tab" type="button" id="tab-detail" data-tab="detail" aria-selected="false" aria-controls="pane-detail" tabindex="-1">Definition</button>
+      <button role="tab" type="button" id="tab-callers" data-tab="callers" aria-selected="false" aria-controls="pane-callers" tabindex="-1">Callers</button>
+      <button role="tab" type="button" id="tab-callees" data-tab="callees" aria-selected="false" aria-controls="pane-callees" tabindex="-1">Callees</button>
+      <button role="tab" type="button" id="tab-impact" data-tab="impact" aria-selected="false" aria-controls="pane-impact" tabindex="-1">Impact</button>
+      <button role="tab" type="button" id="tab-path" data-tab="path" aria-selected="false" aria-controls="pane-path" tabindex="-1">Path</button>
+    </nav>
+    <div class="tab-body">
+      <section data-pane="ask" id="pane-ask" role="tabpanel" aria-labelledby="tab-ask">
+        <form id="ask-form">
+          <textarea id="ask-input" rows="3" maxlength="1000" aria-label="Question about the repository" placeholder="e.g. What calls function_name? What breaks if I change ClassName?"></textarea>
+          <div class="ask-actions">
+            <span class="muted small">Answers come from graph evidence via the Meta Model API. <kbd>Ctrl</kbd>+<kbd>Enter</kbd> to ask.</span>
+            <button id="ask-btn" class="primary" type="submit">Ask</button>
+          </div>
+        </form>
+        <div id="answer"></div>
+      </section>
+      <section data-pane="detail" id="pane-detail" role="tabpanel" aria-labelledby="tab-detail" hidden><div id="detail" class="muted">Pick a search result or a graph node.</div></section>
+      <section data-pane="callers" id="pane-callers" role="tabpanel" aria-labelledby="tab-callers" hidden><div id="callers" class="muted">—</div></section>
+      <section data-pane="callees" id="pane-callees" role="tabpanel" aria-labelledby="tab-callees" hidden><div id="callees" class="muted">—</div></section>
+      <section data-pane="impact" id="pane-impact" role="tabpanel" aria-labelledby="tab-impact" hidden>
+        <div class="row">
+          <label>Depth <input id="impact-depth" type="number" min="1" max="6" step="1" value="3" title="How many dependency hops to follow (1–6)"></label>
+          <button id="impact-btn" class="primary" type="button" disabled title="Select a symbol first">Analyze impact</button>
+        </div>
+        <div id="impact" class="muted">Select a symbol, then analyze what depends on it.</div>
+      </section>
+      <section data-pane="path" id="pane-path" role="tabpanel" aria-labelledby="tab-path" hidden>
+        <p class="muted small">Shortest path from the selected node to a target, following the relationship types ticked above the graph (packages excluded).</p>
+        <input id="path-target" type="search" placeholder="search target…" maxlength="200" aria-label="Path target">
+        <ul id="path-results" class="results compact"></ul>
+        <label class="small"><input id="path-undirected" type="checkbox"> ignore edge direction</label>
+        <div id="path" class="muted"></div>
+      </section>
+    </div>
+  </aside>
+</main>
+
+<dialog id="confirm-dialog" aria-labelledby="confirm-title">
+  <form method="dialog" id="confirm-form">
+    <h2 id="confirm-title">Delete repository?</h2>
+    <p id="confirm-text"></p>
+    <p id="confirm-error" class="error small" hidden></p>
+    <div class="dialog-actions">
+      <button id="confirm-cancel" type="button" class="ghost">Cancel</button>
+      <button id="confirm-ok" type="submit" class="danger-solid">Delete</button>
+    </div>
+  </form>
+</dialog>
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+</body>
+</html>

@@ -1,0 +1,20 @@
+# Never upload local secrets. Vercel's defaults exclude .env.local but NOT .env.
+.env
+.env.*
+!.env.example
+
+# Not needed at runtime
+tests/
+docs/
+.pytest_cache/
+**/__pycache__/
+*.pyc
+build/
+*.egg-info/
+
+# Developer tooling and local environments (a CLI deploy uploads the working folder, not the git tree)
+scripts/
+.venv/
+venv/
+.ruff_cache/
+*.log
