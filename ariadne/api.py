@@ -240,6 +240,22 @@ def impact(uid: str = Query(..., max_length=600), depth: int = 3, rels: Optional
     return gq.impact(uid, depth, _split(rels))
 
 
+class ScenarioRequest(BaseModel):
+    scenario: str = Field(..., min_length=1, max_length=1000)
+    targets: Optional[list[str]] = Field(default=None, max_length=10)
+    depth: int = Field(default=3, ge=1, le=6)
+    rels: Optional[list[str]] = Field(default=None, max_length=4)
+    use_model: bool = True
+
+
+@app.post("/api/repos/{repo_id}/impact/scenario")
+def impact_scenario(body: ScenarioRequest, gq: GraphQueries = Depends(repo_queries),
+                    meta: MetaClient = Depends(get_meta)):
+    """Natural-language change scenario → matched indexed targets → impact report. Read-only."""
+    from .scenario import analyze
+    return analyze(gq, meta, body.scenario, body.targets, body.depth, body.rels, body.use_model)
+
+
 @app.post("/api/repos/{repo_id}/ask")
 def ask(body: AskRequest, gq: GraphQueries = Depends(repo_queries), meta: MetaClient = Depends(get_meta)):
     return answer_question(gq, meta, body.question)

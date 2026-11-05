@@ -23,6 +23,7 @@ pytestmark = pytest.mark.skipif(os.getenv("ARIADNE_BROWSER_TESTS") != "1",
                                 reason="set ARIADNE_BROWSER_TESTS=1 to run browser tests")
 
 REPOS = ("github__acme__shop", "github__acme__shop2")
+FULLSTACK = "github__acme__fullstack"
 PAINTED = """() => {
   let painted = 0;
   for (const c of document.querySelectorAll('#graph-canvas canvas')) {
@@ -46,7 +47,7 @@ class _Store:
         return True
 
     def list_repos(self):
-        return [{"repo_id": r, "owner": "acme", "name": r.split("__")[-1], "status": "ready"} for r in REPOS]
+        return [{"repo_id": r, "owner": "acme", "name": r.split("__")[-1], "status": "ready"} for r in (*REPOS, FULLSTACK)]
 
 
 @pytest.fixture(scope="module")
@@ -57,6 +58,10 @@ def base_url(fixture_graph_module):
     from tests.memory_queries import MemoryQueries
 
     queries = {r: MemoryQueries(fixture_graph_module, r) for r in REPOS}
+    from ariadne.indexer import build_graph
+    from ariadne.ingest.fetch import Limits, walk_directory
+    from tests.conftest import FULLSTACK_DIR
+    queries[FULLSTACK] = MemoryQueries(build_graph(walk_directory(str(FULLSTACK_DIR), Limits()))[0], FULLSTACK)
     api.app.dependency_overrides[api.get_settings] = lambda: Settings(falkordb_host="memory")
     api.app.dependency_overrides[api.get_store] = lambda: _Store()
     api.app.dependency_overrides[api.repo_queries] = lambda repo_id: queries[repo_id]
@@ -215,5 +220,239 @@ def test_overview_is_readable_and_complete(browser, base_url, fixture_graph_modu
     page.mouse.move(2, 2)                         # leave the canvas straight from the node
     page.wait_for_timeout(150)
     assert page.is_hidden("#graph-tip") and page.evaluate("() => state.cy.elements('.hl, .faded').length") == 0
+    assert not errors, errors
+    page.close()
+
+
+TO_CENTS = "backend/utils/money.py::to_cents"
+
+
+def _impact_page(browser, base_url, width=1440):
+    page = browser.new_page(viewport={"width": width, "height": 900})
+    errors = []
+    page.on("pageerror", lambda e: errors.append(str(e)))
+    page.on("console", lambda m: errors.append(m.text) if m.type == "error" and "status of 500" not in m.text else None)
+    reqs = []
+    page.on("request", lambda r: reqs.append(r.url) if "/impact?" in r.url else None)
+    page.goto(f"{base_url}/#{FULLSTACK}")
+    _wait_drawn(page)
+    page.evaluate("() => { document.querySelector('#impact-symbol-mode').open = true; document.querySelector('#impact-advanced').open = true; }")
+    page.evaluate("(u) => openNode(u, { tab: 'impact' })", TO_CENTS)
+    page.wait_for_function("() => !document.querySelector('#impact-symbol-btn').disabled")
+    return page, errors, reqs
+
+
+def test_impact_panel_full_report(browser, base_url):
+    page, errors, reqs = _impact_page(browser, base_url)
+    held = []
+    page.route("**/impact?*", lambda r: held.append(r))
+    page.click("#impact-symbol-btn")
+    page.wait_for_timeout(200)
+    assert "Analyzing dependents of" in page.inner_text("#impact") and page.is_disabled("#impact-symbol-btn")  # loading state
+    for r in held:
+        r.continue_()
+    page.unroute("**/impact?*")
+    page.wait_for_selector("#impact .imp-sec")
+    assert page.locator("#impact .imp-sec").count() == 7
+    stats = page.locator("#impact .imp-stats .stat b").all_inner_texts()
+    assert stats == ["1", "3", "4", "3"]                                                              # depth 3 (default)
+    assert "rels=CALLS,IMPORTS,EXTENDS,IMPLEMENTS" in reqs[-1]
+    flow = page.locator("#impact .imp-sec").nth(3)
+    assert "UI → API path(s) found" in flow.inner_text()
+    assert flow.locator(".arrow.inferred").count() == 1 and flow.locator("a.sym").count() == 7
+    assert page.locator("#impact .layer.inferred").count() > 0 and page.locator("#impact .basis.confirmed").count() > 0
+    # graph shows every dependency edge of the report (multiple parents)
+    assert page.evaluate("() => graph.mode") == "impact"
+    # clicking a symbol in a path opens its definition
+    page.locator('#impact .imp-path a.sym[data-uid="backend/app.py::create_order"]').first.click()
+    page.wait_for_function("() => state.current === 'backend/app.py::create_order'")
+    assert page.evaluate("() => [...document.querySelectorAll('[data-pane]')].filter(p => !p.hidden).map(p => p.dataset.pane)") == ["detail"]
+    assert not errors, errors
+    page.close()
+
+
+def test_impact_filters_depth_and_errors(browser, base_url):
+    page, errors, reqs = _impact_page(browser, base_url)
+    page.fill("#impact-depth", "1")
+    page.click("#impact-symbol-btn")
+    page.wait_for_selector("#impact .imp-sec")
+    assert page.locator("#impact .imp-stats .stat b").all_inner_texts()[3] == "1"
+    assert "Not established from indexed code." in page.inner_text("#impact")                         # route is 2 hops away
+    for v in ("CALLS", "IMPORTS", "EXTENDS", "IMPLEMENTS"):
+        page.uncheck(f"#rel-filters input[value={v}]")
+    n = len(reqs)
+    page.click("#impact-symbol-btn")
+    page.wait_for_timeout(200)
+    assert "Tick at least one of calls, imports" in page.inner_text("#impact") and len(reqs) == n      # no request
+    page.check("#rel-filters input[value=IMPORTS]")
+    page.fill("#impact-depth", "3")
+    page.click("#impact-symbol-btn")
+    page.wait_for_selector("#impact .imp-sec")
+    assert "rels=IMPORTS&" in reqs[-1] or reqs[-1].endswith("rels=IMPORTS")
+    page.route("**/impact?*", lambda r: r.fulfill(status=500, content_type="application/json", body='{"detail":"boom (test)"}'))
+    page.click("#impact-symbol-btn")
+    page.wait_for_selector("#impact [data-action=retry-impact]")
+    assert "boom (test)" in page.inner_text("#impact")
+    page.unroute("**/impact?*")
+    for v in ("CALLS", "EXTENDS", "IMPLEMENTS"):
+        page.check(f"#rel-filters input[value={v}]")
+    page.click("#impact [data-action=retry-impact]")
+    page.wait_for_selector("#impact .imp-sec")
+    assert not errors, errors
+    page.close()
+
+
+def test_impact_panel_narrow_layout(browser, base_url):
+    page, errors, _ = _impact_page(browser, base_url, width=390)
+    page.click("#impact-symbol-btn")
+    page.wait_for_selector("#impact .imp-sec")
+    assert page.evaluate("() => document.documentElement.scrollWidth - window.innerWidth") <= 0
+    widest = page.evaluate("() => Math.max(...[...document.querySelectorAll('#impact .imp-sec')].map(s => s.scrollWidth - s.clientWidth))")
+    assert widest <= 1, widest
+    assert not errors, errors
+    page.close()
+
+
+
+def test_impact_symbol_picker_and_selection_flow(browser, base_url):
+    page = browser.new_page(viewport={"width": 1440, "height": 900})
+    errors = []
+    page.on("pageerror", lambda e: errors.append(str(e)))
+    page.on("console", lambda m: errors.append(m.text) if m.type == "error" else None)
+    page.goto(f"{base_url}/#{FULLSTACK}")
+    _wait_drawn(page)
+    page.click("#tab-impact")
+    page.click("#impact-symbol-mode > summary")                         # the optional symbol workflow
+    assert "No symbol selected." in page.inner_text("#impact-selected")
+    assert page.is_visible("#impact-search") and page.is_disabled("#impact-symbol-btn")
+    # picker: real indexed search, then pick
+    page.fill("#impact-search", "to_cents")
+    page.wait_for_selector("#impact-results li[data-uid]")
+    assert page.locator("#impact-results li[data-uid]").first.get_attribute("data-uid") == TO_CENTS
+    page.fill("#impact-search", "zzz_no_such_symbol")
+    page.wait_for_function("() => document.querySelector('#impact-results').innerText.includes('No indexed symbol matches')")
+    page.fill("#impact-search", "to_cents")
+    page.wait_for_selector("#impact-results li[data-uid]")
+    page.locator("#impact-results li[data-uid]").first.click()
+    page.wait_for_function("(u) => state.currentNode && state.currentNode.uid === u", arg=TO_CENTS)
+    sel = page.inner_text("#impact-selected")
+    assert "to_cents" in sel and "backend/utils/money.py:1-2" in sel
+    assert page.is_hidden("#impact-picker") and page.is_enabled("#impact-symbol-btn")
+    assert page.evaluate("() => [...document.querySelectorAll('[data-pane]')].filter(p => !p.hidden).map(p => p.dataset.pane)") == ["impact"]
+    _wait_drawn(page, "neighbors")
+    assert page.evaluate("(u) => graph.center === u && state.cy.$id(u).data('center') === 1", TO_CENTS)   # highlighted in the graph
+    # graph selection populates the same Impact selection
+    target = "backend/services/orders.py::place_order"
+    page.evaluate("(u) => state.cy.$id(u).emit('tap')", target)
+    page.wait_for_function("(u) => state.currentNode && state.currentNode.uid === u", arg=target)
+    assert "place_order" in page.inner_text("#impact-selected") and "backend/services/orders.py:7-12" in page.inner_text("#impact-selected")
+    # "Change symbol" re-opens the picker; Enter picks the first result
+    page.click("#impact-change")
+    assert page.is_visible("#impact-search")
+    page.fill("#impact-search", "create_order")
+    page.wait_for_selector("#impact-results li[data-uid]")
+    page.press("#impact-search", "Enter")
+    page.wait_for_function("() => state.currentNode && state.currentNode.uid === 'backend/app.py::create_order'")
+    page.click("#impact-symbol-btn")
+    page.wait_for_selector("#impact .imp-sec")
+    assert page.locator("#impact .imp-sec h3").all_inner_texts()[0] == "Summary"
+    # switching repository clears the selection
+    page.select_option("#repo-select", REPOS[0])
+    page.wait_for_function("() => state.repo === 'github__acme__shop' && !state.current")
+    assert "No symbol selected." in page.inner_text("#impact-selected") and page.is_disabled("#impact-symbol-btn")
+    assert not errors, errors
+    page.close()
+
+
+def test_impact_legacy_server_response(browser, base_url):
+    page, errors, _ = _impact_page(browser, base_url)
+    def legacy(route):
+        import json as _json
+        body = _json.loads(route.fetch().text())
+        body.pop("report")
+        route.fulfill(status=200, content_type="application/json", body=_json.dumps(body))
+    page.route("**/impact?*", legacy)
+    page.click("#impact-symbol-btn")
+    page.wait_for_selector("#impact .notice.warn")
+    txt = page.inner_text("#impact")
+    assert "older" in txt and "Restart it" in txt and "backend/services/orders.py" in page.inner_html("#impact")
+    assert not errors, errors
+    page.close()
+
+
+
+def _scenario(page, text, held=None):
+    page.fill("#impact-scenario", text)
+    page.click("#impact-btn")
+
+
+def test_impact_scenario_workflow(browser, base_url):
+    page = browser.new_page(viewport={"width": 1440, "height": 900})
+    errors = []
+    page.on("pageerror", lambda e: errors.append(str(e)))
+    page.on("console", lambda m: errors.append(m.text) if m.type == "error" and "status of 500" not in m.text else None)
+    page.goto(f"{base_url}/#{FULLSTACK}")
+    _wait_drawn(page)
+    page.click("#tab-impact")
+    assert page.is_visible("#impact-scenario") and page.is_disabled("#impact-btn")
+    assert "acme/fullstack" in page.inner_text("#impact-repo")
+    assert "select a symbol first" not in page.inner_text("#pane-impact").lower()
+    # example chip populates the input and enables Analyze
+    page.locator("#impact-examples [data-example]").nth(1).click()
+    assert page.input_value("#impact-scenario").startswith("If I change the message format") and page.is_enabled("#impact-btn")
+    # exact identifier → analyzed immediately; loading state while the request is held
+    held = []
+    page.route("**/impact/scenario", lambda r: held.append(r))
+    _scenario(page, "If I change to_cents, what could be affected?")
+    page.wait_for_timeout(200)
+    assert "Matching your description to indexed symbols" in page.inner_text("#impact") and page.is_disabled("#impact-btn")
+    for r in held:
+        r.continue_()
+    page.unroute("**/impact/scenario")
+    page.wait_for_selector("#impact .imp-sec h3:text-is('Summary')")
+    heads = page.locator("#impact .imp-sec h3").all_inner_texts()
+    assert [h.split(" (")[0].strip() for h in heads] == ["Scenario", "Matched targets", "Summary", "Dependency paths",
+        "Architecture & layers", "User flows / UI impact", "Affected files", "Suggested inspection", "Explanation & evidence"]
+    assert page.is_checked(f"#impact input[data-target='{TO_CENTS}']")
+    assert page.evaluate("() => graph.mode") == "impact"
+    # clicking a symbol opens its definition and keeps the report
+    page.locator("#impact .imp-path a.sym[data-uid='backend/app.py::create_order']").first.click()
+    page.wait_for_function("() => state.current === 'backend/app.py::create_order'")
+    page.click("#tab-impact")
+    assert page.locator("#impact .imp-sec h3:text-is('Summary')").count() == 1
+    # weak match → confirmation needed; correct the targets and re-analyze two of them
+    _scenario(page, "If I change reconcile, what should I inspect?")
+    page.wait_for_selector("#impact-reanalyze")
+    assert page.locator("#impact .imp-sec h3:text-is('Summary')").count() == 0
+    assert page.evaluate("() => graph.mode") != "impact"         # the earlier impact is not left on the canvas
+    assert page.is_checked("#impact input[data-target='backend/services/orders.py::reconcile']")
+    assert page.inner_text("#impact-reanalyze") == "Analyze 1 selected target"
+    page.check("#impact input[data-target='backend/services/orders.py::retry_reconcile']")
+    assert page.inner_text("#impact-reanalyze") == "Analyze 2 selected targets"
+    page.click("#impact-reanalyze")
+    page.wait_for_selector("#impact .imp-sec h3:text-is('Summary')")
+    assert "Targets:" in page.locator("#impact .imp-sec").nth(2).inner_text()
+    page.uncheck("#impact input[data-target='backend/services/orders.py::reconcile']")
+    page.uncheck("#impact input[data-target='backend/services/orders.py::retry_reconcile']")
+    assert page.is_disabled("#impact-reanalyze") and page.inner_text("#impact-reanalyze") == "Select at least one target"
+    page.check("#impact input[data-target='backend/services/orders.py::reconcile']")
+    page.click("#impact-reanalyze")
+    page.wait_for_function("() => graph.mode === 'impact'")
+    # no match: the canvas drops the previous impact view
+    _scenario(page, "What happens if authentication middleware changes?")
+    page.wait_for_function("() => graph.mode === 'overview'")
+    page.wait_for_function("() => document.querySelector('#impact').innerText.includes('No matching indexed symbol found')")
+    # error + retry
+    page.route("**/impact/scenario", lambda r: r.fulfill(status=500, content_type="application/json", body='{"detail":"scenario down (test)"}'))
+    _scenario(page, "If I change to_cents")
+    page.wait_for_selector("#impact [data-action=retry-scenario]")
+    assert "scenario down (test)" in page.inner_text("#impact")
+    page.unroute("**/impact/scenario")
+    page.click("#impact [data-action=retry-scenario]")
+    page.wait_for_selector("#impact .imp-sec h3:text-is('Summary')")
+    # narrow layout
+    page.set_viewport_size({"width": 390, "height": 844})
+    page.wait_for_timeout(400)
+    assert page.evaluate("() => document.documentElement.scrollWidth - window.innerWidth") <= 0
     assert not errors, errors
     page.close()

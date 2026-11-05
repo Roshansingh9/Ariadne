@@ -20,6 +20,11 @@ from .resolver import resolve
 from .store import StoreError, stats_json
 
 
+# 2: symbols carry decorators / http_calls / renders_jsx, and CALLS edges from JSX carry `syntax`.
+# Graphs without it (version 1) still work: impact analysis derives what it can from stored source.
+GRAPH_VERSION = 2
+
+
 class IndexingError(RuntimeError):
     pass
 
@@ -91,7 +96,7 @@ def run_index(url: str, ref: Optional[str], settings: Settings, store) -> Iterat
         t0 = time.time()
         repo_props = {
             **base_props, "ref": fetched.ref or "", "commit": fetched.commit or "",
-            "source": fetched.source, "truncated": fetched.truncated,
+            "source": fetched.source, "truncated": fetched.truncated, "graph_version": GRAPH_VERSION,
             "stats_json": stats_json(stats),
             "skipped_json": stats_json({"counts": fetched.skipped, "samples": fetched.skipped_samples,
                                         "parse_errors": parse_errors[:20]}),
@@ -140,7 +145,7 @@ def index_directory(path: str, repo_id: str, store, settings: Optional[Settings]
     fetched = walk_directory(path, limits_from(settings))
     graph, errors = build_graph(fetched)
     stats = graph.stats()
-    props = {"url": url or f"local:{repo_id}", "name": repo_id, "owner": "", "host": "local",
+    props = {"url": url or f"local:{repo_id}", "name": repo_id, "owner": "", "host": "local", "graph_version": GRAPH_VERSION,
              "ref": "", "commit": "", "source": "directory", "truncated": fetched.truncated,
              "stats_json": stats_json(stats),
              "skipped_json": stats_json({"counts": fetched.skipped, "samples": fetched.skipped_samples})}

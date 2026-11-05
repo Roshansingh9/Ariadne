@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import re
 from typing import Optional
 
 from tree_sitter import Node
 
+from .. import frameworks
 from ..model import CallSite, ImportBinding, ParsedFile, Symbol
 from .base import SymbolBuilder, get_parser, one_line, text
+
+_PY_STRING = re.compile(r"""^[rRbBuUfF]{0,2}(['"]{1,3})(.*)\1$""", re.S)
 
 _SKIP_CALLS = {"super", "print", "len", "isinstance", "range", "str", "int", "dict", "list",
                "set", "tuple", "bool", "float", "repr", "type", "getattr", "setattr",
@@ -50,7 +54,10 @@ class _PyVisitor:
         if t == "decorated_definition":
             inner = node.child_by_field_name("definition")
             if inner is not None:
-                self._definition(inner, node, scope, cls)
+                decorators = [one_line(text(c), 160) for c in node.named_children if c.type == "decorator"]
+                sym = self._definition(inner, node, scope, cls)
+                if sym is not None:
+                    sym.decorators = decorators[:8]
                 # decorators may contain calls
                 for c in node.named_children:
                     if c.type == "decorator":
@@ -75,10 +82,10 @@ class _PyVisitor:
         for c in node.named_children:
             self.visit(c, scope, cls)
 
-    def _definition(self, node: Node, outer: Node, scope: Optional[Symbol], cls: Optional[Symbol]):
+    def _definition(self, node: Node, outer: Node, scope: Optional[Symbol], cls: Optional[Symbol]) -> Optional[Symbol]:
         name = text(node.child_by_field_name("name"))
         if not name:
-            return
+            return None
         qual = f"{scope.qualname}.{name}" if scope else name
         body = node.child_by_field_name("body")
         if node.type == "class_definition":
@@ -92,7 +99,7 @@ class _PyVisitor:
             if body is not None:
                 for c in body.named_children:
                     self.visit(c, sym, sym)
-            return
+            return sym
         is_method = scope is not None and scope.label == "Class"
         sym = self.b.make(label="Function", kind="method" if is_method else "function", name=name,
                           qualname=qual, node=outer, signature=_signature(node),
@@ -104,6 +111,7 @@ class _PyVisitor:
                 self.visit(sub, sym, cls)       # default-value calls
         if body is not None:
             self.visit(body, sym, cls)
+        return sym
 
     def _call(self, node: Node, scope: Optional[Symbol]):
         fn = node.child_by_field_name("function")
@@ -124,9 +132,25 @@ class _PyVisitor:
             if obj is not None and obj.type == "call" and text(obj.child_by_field_name("function")) == "super":
                 receiver = "super()"
             site = CallSite(name=text(attr), receiver=receiver, line=line)
+            self._http_call(node, receiver, text(attr), scope)
         else:
             return
         (scope.calls if scope else self.p.module_calls).append(site)
+
+    def _http_call(self, node: Node, receiver: Optional[str], method: str, scope: Optional[Symbol]) -> None:
+        """`client.get("/api/x")`, `requests.post(...)`: an HTTP call with a literal URL."""
+        if scope is None or method not in frameworks.HTTP_METHODS or not receiver:
+            return
+        if not re.search(r"(client|requests|httpx|session)$", receiver):
+            return
+        args = node.child_by_field_name("arguments")
+        first = args.named_children[0] if args is not None and args.named_children else None
+        if first is None or first.type not in ("string", "concatenated_string"):
+            return
+        m = _PY_STRING.match(text(first))
+        call = frameworks.http_call(method, m.group(2)) if m else None
+        if call and call not in scope.http_calls:
+            scope.http_calls.append(call)
 
     def _import(self, node: Node):
         line = node.start_point.row + 1

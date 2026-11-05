@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import re
+
 from typing import Optional
 
 from tree_sitter import Node
 
+from .. import frameworks
 from ..model import CallSite, ImportBinding, ParsedFile, Symbol
 from .base import SymbolBuilder, get_parser, one_line, text
 
@@ -89,6 +92,10 @@ class _JsVisitor:
         if t == "variable_declarator":
             if self._declarator(node, scope, cls):
                 return
+        if t in ("jsx_element", "jsx_self_closing_element", "jsx_fragment") and scope is not None:
+            scope.renders_jsx = True
+        if t in ("jsx_opening_element", "jsx_self_closing_element"):
+            self._jsx(node, scope)
         if t == "call_expression":
             self._call(node, scope)
         elif t == "new_expression":
@@ -219,6 +226,58 @@ class _JsVisitor:
         if site.name:
             (scope.calls if scope else self.p.module_calls).append(site)
 
+    def _jsx(self, node: Node, scope: Optional[Symbol]) -> None:
+        """`<OrderForm/>` renders a component; `onClick={handleSubmit}` wires an event handler.
+
+        Recorded as JSX references (CallSite.jsx), so the resolver can link them like calls.
+        Lowercase tags (`<div>`) are DOM elements, not components, and are skipped."""
+        line = node.start_point.row + 1
+        name = node.child_by_field_name("name")
+        if name is not None:
+            if name.type == "identifier" and text(name)[:1].isupper():
+                self._add_call(scope, CallSite(name=text(name), receiver=None, line=line, jsx="render"))
+            elif name.type in ("member_expression", "nested_identifier"):
+                obj, _, prop = text(name).rpartition(".")
+                if prop[:1].isupper():
+                    self._add_call(scope, CallSite(name=prop, receiver=obj, line=line, jsx="render"))
+        for attr in node.named_children:
+            if attr.type != "jsx_attribute" or not attr.named_children:
+                continue
+            attr_name = text(attr.named_children[0])
+            if not re.match(r"^on[A-Z]", attr_name) or len(attr.named_children) < 2:
+                continue
+            value = attr.named_children[1]
+            if value.type != "jsx_expression" or not value.named_children:
+                continue
+            ref = value.named_children[0]
+            if ref.type == "identifier":
+                self._add_call(scope, CallSite(name=text(ref), receiver=None, line=line, jsx="event", event=attr_name))
+            elif ref.type == "member_expression":
+                prop = ref.child_by_field_name("property")
+                obj = ref.child_by_field_name("object")
+                if prop is not None:
+                    self._add_call(scope, CallSite(name=text(prop), receiver=one_line(text(obj), 80) if obj is not None else None,
+                                                   line=line, jsx="event", event=attr_name))
+
+    def _http_call(self, node: Node, method: str, scope: Optional[Symbol]) -> None:
+        """fetch("/api/x", {method: "POST"}) / axios.post("/api/x"): an HTTP call with a literal URL."""
+        if scope is None:
+            return
+        args = node.child_by_field_name("arguments")
+        if args is None or not args.named_children:
+            return
+        first = args.named_children[0]
+        if first.type not in ("string", "template_string"):
+            return
+        url = text(first)[1:-1]
+        if method == "fetch":
+            opt = re.search(r"""method\s*:\s*['"`](\w+)['"`]""", text(args.named_children[1])) \
+                if len(args.named_children) > 1 else None
+            method = opt.group(1) if opt else "GET"
+        call = frameworks.http_call(method, url)
+        if call and call not in scope.http_calls:
+            scope.http_calls.append(call)
+
     def _call(self, node: Node, scope: Optional[Symbol]) -> None:
         fn = node.child_by_field_name("function")
         if fn is None:
@@ -231,6 +290,8 @@ class _JsVisitor:
                 if spec is not None and not (node.parent is not None and node.parent.type == "variable_declarator"):
                     self.p.imports.append(ImportBinding(local="", module=spec, imported=None, line=line))
                 return
+            if name == "fetch":
+                self._http_call(node, "fetch", scope)
             if name in _SKIP_CALLS:
                 return
             self._add_call(scope, CallSite(name=name, receiver=None, line=line))
@@ -244,6 +305,8 @@ class _JsVisitor:
             if prop is None:
                 return
             receiver = one_line(text(obj), 80) if obj is not None else None
+            if receiver == "axios" and text(prop) in frameworks.HTTP_METHODS:
+                self._http_call(node, text(prop), scope)
             self._add_call(scope, CallSite(name=text(prop), receiver=receiver, line=line))
 
     def _import(self, node: Node) -> None:

@@ -10,6 +10,10 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 FIXTURE_DIR = ROOT / "tests" / "fixtures" / "sample_repo"
+FULLSTACK_DIR = ROOT / "tests" / "fixtures" / "fullstack_repo"
+
+# Fixture repositories are data for the indexer (they contain files named test_*.py on purpose).
+collect_ignore = ["fixtures"]
 
 
 @pytest.fixture(scope="session")

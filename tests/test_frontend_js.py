@@ -41,10 +41,14 @@ const a = t.nextSeq("k"), b = t.nextSeq("k");
 out.seq = [t.isLatest("k", a), t.isLatest("k", b)];
 out.status = t.statusHtml("error", "<b>boom</b>", "retry-ask");
 t.state.repo = null; t.state.current = null; t.state.writesEnabled = false; t.updateActions();
-out.noRepo = { ask: el("ask-btn").disabled, impact: el("impact-btn").disabled, del: el("repo-delete").disabled,
+out.noRepo = { ask: el("ask-btn").disabled, impact: el("impact-symbol-btn").disabled, scenario: el("impact-btn").disabled, del: el("repo-delete").disabled,
                index: el("index-btn").disabled, indexTitle: el("index-btn").title };
-t.state.repo = "r"; t.state.current = "u"; t.state.writesEnabled = true; t.state.busy.ask = true; t.updateActions();
-out.withRepo = { ask: el("ask-btn").disabled, askText: el("ask-btn").textContent, impact: el("impact-btn").disabled,
+t.state.repo = "r"; t.state.current = "u"; t.state.currentNode = null; t.updateActions();
+out.loading = { impact: el("impact-symbol-btn").disabled, title: el("impact-symbol-btn").title };
+t.state.currentNode = { uid: "u" }; t.state.writesEnabled = true; t.state.busy.ask = true; t.updateActions();
+el("impact-scenario").value = "If I change x"; t.updateActions();
+out.withRepo = { ask: el("ask-btn").disabled, askText: el("ask-btn").textContent, impact: el("impact-symbol-btn").disabled,
+                 scenario: el("impact-btn").disabled,
                  del: el("repo-delete").disabled, index: el("index-btn").disabled };
 const ev = (id, kind) => ({ id, kind, title: "t" + id, facts: ["f"], uid: "u" + id, location: "a.py:1", snippet: null });
 out.answers = {
@@ -98,10 +102,14 @@ def test_latest_request_wins(js):
     assert js["seq"] == [False, True]
 
 
+def test_impact_waits_for_the_selected_symbol_to_load(js):
+    assert js["loading"] == {"impact": True, "title": "Loading the selected symbol…"}   # symbol mode waits for the load
+
+
 def test_action_states(js):
-    assert js["noRepo"] == {"ask": True, "impact": True, "del": True, "index": True,
+    assert js["noRepo"] == {"ask": True, "impact": True, "scenario": True, "del": True, "index": True,
                             "indexTitle": "Indexing is disabled: the server has no ARIADNE_INDEX_TOKEN configured."}
-    assert js["withRepo"] == {"ask": True, "askText": "Asking…", "impact": False, "del": False, "index": False}
+    assert js["withRepo"] == {"ask": True, "askText": "Asking…", "impact": False, "scenario": False, "del": False, "index": False}
 
 
 def test_no_match_answer_shows_suggestions_not_an_answer(js):

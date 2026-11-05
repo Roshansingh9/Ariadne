@@ -5,9 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Ariadne — code graph intelligence</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/styles.css?v=9dbf691e35">
+  <link rel="stylesheet" href="/styles.css?v=c3a124e284">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.30.2/cytoscape.min.js" defer></script>
-  <script src="/app.js?v=c198dfa3c0" defer></script>
+  <script src="/app.js?v=17e76393c7" defer></script>
 </head>
 <body>
 <header class="topbar">
@@ -117,11 +117,29 @@
       <section data-pane="callers" id="pane-callers" role="tabpanel" aria-labelledby="tab-callers" hidden><div id="callers" class="muted">—</div></section>
       <section data-pane="callees" id="pane-callees" role="tabpanel" aria-labelledby="tab-callees" hidden><div id="callees" class="muted">—</div></section>
       <section data-pane="impact" id="pane-impact" role="tabpanel" aria-labelledby="tab-impact" hidden>
-        <div class="row">
-          <label>Depth <input id="impact-depth" type="number" min="1" max="6" step="1" value="3" title="How many dependency hops to follow (1–6)"></label>
-          <button id="impact-btn" class="primary" type="button" disabled title="Select a symbol first">Analyze impact</button>
+        <div class="small muted" id="impact-repo">Repository: —</div>
+        <label for="impact-scenario" class="imp-label">Describe the change you’re considering</label>
+        <textarea id="impact-scenario" rows="3" maxlength="1000" placeholder="Describe the change you’re considering…"></textarea>
+        <div class="chips imp-examples" id="impact-examples" aria-label="Example scenarios"></div>
+        <div class="row imp-actions">
+          <details class="imp-advanced" id="impact-advanced">
+            <summary>Advanced</summary>
+            <label>Depth <input id="impact-depth" type="number" min="1" max="6" step="1" value="3" title="How many dependency hops to follow (1–6)"></label>
+            <div class="small muted">Relationships: follows the calls / imports / extends / implements filters ticked above the graph.</div>
+            <label class="small"><input type="checkbox" id="impact-use-model" checked> Let the Meta model rank real candidates when there is no exact match</label>
+          </details>
+          <button id="impact-btn" class="primary" type="button" disabled title="Describe a change first">Analyze impact</button>
         </div>
-        <div id="impact" class="muted">Select a symbol, then analyze what depends on it.</div>
+        <div id="impact" class="muted">Describe a change above and press <b>Analyze impact</b>. You don’t need to pick a symbol first.</div>
+        <details class="imp-symbol" id="impact-symbol-mode">
+          <summary>Or analyze one specific symbol</summary>
+          <div class="impact-selected" id="impact-selected" aria-live="polite"></div>
+          <div class="impact-picker" id="impact-picker">
+            <input id="impact-search" type="search" placeholder="Find a function, class or file…" maxlength="200" aria-label="Find a symbol to analyze" autocomplete="off">
+            <ul id="impact-results" class="results compact" aria-label="Symbols to analyze"></ul>
+          </div>
+          <button id="impact-symbol-btn" class="ghost" type="button" disabled title="Pick a symbol first">Analyze this symbol</button>
+        </details>
       </section>
       <section data-pane="path" id="pane-path" role="tabpanel" aria-labelledby="tab-path" hidden>
         <p class="muted small">Shortest path from the selected node to a target, following the relationship types ticked above the graph (packages excluded).</p>

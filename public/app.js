@@ -6,8 +6,10 @@ const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 const state = {
   repo: null, current: null, cy: null, health: null, lastEvidence: [], repos: [],
   writesEnabled: true, tokenRequired: false,
-  busy: { index: false, ask: false, impact: false, path: false, delete: false },
+  busy: { index: false, ask: false, impact: false, path: false, delete: false, scenario: false },
+  lastScenarioTargets: null,
   lastPathDst: null,
+  currentNode: null,                             // the loaded selected symbol (uid, name, label, path, lines)
 };
 const COLORS = { File: "#64748b", Class: "#8b5cf6", Function: "#0ea5e9", Package: "#f59e0b" };
 
@@ -89,10 +91,17 @@ function updateActions() {
   askBtn.disabled = state.busy.ask || !state.repo;
   askBtn.textContent = state.busy.ask ? "Asking…" : "Ask";
   askBtn.title = state.repo ? "Ask a question answered from graph evidence" : "Select a repository first";
-  const imp = $("#impact-btn");
-  imp.disabled = state.busy.impact || !state.current;
-  imp.textContent = state.busy.impact ? "Analyzing…" : "Analyze impact";
-  imp.title = state.current ? "Find everything that depends on the selected symbol" : "Select a symbol first";
+  const sc = $("#impact-btn"), hasText = !!$("#impact-scenario").value.trim();
+  sc.disabled = state.busy.scenario || !state.repo || !hasText;
+  sc.textContent = state.busy.scenario ? "Analyzing…" : "Analyze impact";
+  sc.title = !state.repo ? "Select a repository first" : hasText ? "Match the described change to indexed code and analyze its impact"
+    : "Describe a change first";
+  const imp = $("#impact-symbol-btn");
+  const ready = !!(state.current && state.currentNode && state.currentNode.uid === state.current);
+  imp.disabled = state.busy.impact || !ready;
+  imp.textContent = state.busy.impact ? "Analyzing…" : "Analyze this symbol";
+  imp.title = ready ? "Find everything that depends on the selected symbol"
+    : state.current ? "Loading the selected symbol…" : "Pick a symbol in the picker above, or click a graph node";
 }
 
 /* ---------------- health, repos ---------------- */
@@ -152,6 +161,8 @@ function repoLabel(id) {
 async function selectRepo(id) {
   state.repo = id || null;
   state.current = null;
+  state.currentNode = null;
+  graph.impactPickerOpen = false;
   state.lastPathDst = null;
   nextSeq("node"); nextSeq("ask"); nextSeq("impact"); nextSeq("path"); nextSeq("search"); nextSeq("pathSearch");
   state.busy.ask = state.busy.impact = state.busy.path = false;
@@ -161,7 +172,11 @@ async function selectRepo(id) {
   $("#detail").textContent = "Pick a search result or a graph node.";
   $("#callers").textContent = "Select a symbol to see what calls it.";
   $("#callees").textContent = "Select a symbol to see what it calls.";
-  $("#impact").textContent = "Select a symbol, then analyze what depends on it.";
+  nextSeq("scenario"); state.busy.scenario = false; clearInterval(scenarioTimer);
+  $("#impact").innerHTML = `Describe a change above and press <b>Analyze impact</b>. You don’t need to pick a symbol first.`;
+  $("#impact-repo").innerHTML = id ? `Repository: <b>${h(repoLabel(id))}</b>` : "Repository: —";
+  $("#impact-search").value = ""; $("#impact-results").innerHTML = "";
+  renderImpactSelection();
   $("#path").textContent = "";
   updateActions();
   if (!id) {
@@ -190,6 +205,7 @@ function renderOverview(ov) {
   const top = (ov.hotspots || [])[0];
   $("#ask-input").placeholder = top ? `e.g. What calls ${displayName(top)}? What breaks if I change it?`
     : "e.g. What calls function_name? What breaks if I change ClassName?";
+  renderScenarioExamples(top ? displayName(top) : null);
   const c = ov.counts || {};
   const r = ov.repo || {};
   const stats = r.stats || {};
@@ -354,9 +370,10 @@ async function openNode(uid, { tab } = {}) {
   if (!state.repo || !uid) return;
   const seq = nextSeq("node");
   state.current = uid;
+  state.currentNode = null;
   state.lastPathDst = null;
   nextSeq("impact"); nextSeq("path"); state.busy.impact = state.busy.path = false;   // results belong to the previous node
-  updateActions(); markActive();
+  updateActions(); markActive(); renderImpactSelection();
   $("#detail").textContent = "Loading…";
   // Switch tabs immediately so the click visibly does something while the symbol loads.
   if (tab) showTab(tab); else if ($(".tabs .active").dataset.tab === "ask") showTab("detail");
@@ -368,7 +385,8 @@ async function openNode(uid, { tab } = {}) {
     $("#callees").innerHTML = relList(d.callees, "No resolved callees.") +
       (d.node.external_calls && d.node.external_calls.length ? `<h3>External calls</h3><div class="small">${d.node.external_calls.map((x) => `<code>${h(x)}</code>`).join(" ")}</div>` : "") +
       (d.node.unresolved_calls && d.node.unresolved_calls.length ? `<h3>Unresolved calls</h3><div class="small muted">${d.node.unresolved_calls.map((x) => `<code>${h(x)}</code>`).join(" ")}</div>` : "");
-    $("#impact").innerHTML = `<div class="muted">Analyze what depends on <b>${h(displayName(d.node))}</b>.</div>`;
+    state.currentNode = { ...d.node, uid };
+    renderImpactSelection(); updateActions();
     $("#path").innerHTML = `<div class="muted">Search a target to find a path from <b>${h(displayName(d.node))}</b>.</div>`;
     $$("#path-results li").forEach((li) => li.classList.remove("picked"));
     markActive();
@@ -376,7 +394,8 @@ async function openNode(uid, { tab } = {}) {
   } catch (e) {
     if (!isLatest("node", seq)) return;
     $("#detail").innerHTML = statusHtml("error", e.message, "retry-node");
-    showTab("detail");
+    renderImpactSelection(e.message); updateActions();
+    if ($(".tabs .active").dataset.tab !== "impact") showTab("detail");
   }
 }
 
@@ -405,7 +424,7 @@ function renderDetail(d) {
  *   impact / path – drawn from those analyses; filters hide edge types client-side
  * `graph.seq` discards responses that a newer request has superseded.
  */
-const graph = { mode: null, center: null, seq: 0, autoFit: true, fitting: false, noSize: false, labels: null, hovered: null };
+const graph = { mode: null, center: null, seq: 0, autoFit: true, fitting: false, noSize: false, labels: null, hovered: null, impactPickerOpen: false };
 const OVERVIEW_LIMIT = 150;
 const REL_NAMES = { CALLS: "calls", IMPORTS: "imports", EXTENDS: "extends", IMPLEMENTS: "implements", DEFINES: "defines", DEPENDS_ON: "packages" };
 const DIR_WORDS = { both: "", out: "outgoing ", in: "incoming " };
@@ -753,7 +772,21 @@ function showAnalysisGraph(mode, nodes, edges, centerUid, caption) {
   loadGraph();                                   // applies the current filters + caption
 }
 
-/* ---------------- impact ---------------- */
+/* ---------------- impact ----------------
+ * Selected symbol: the same state.current / state.currentNode used by the graph, Search,
+ * Definition, Callers and Callees. The Impact tab shows it and has its own picker
+ * (GET /search: indexed symbols only); picking opens the symbol like a graph click does,
+ * which also centres and highlights it in the graph.
+ *
+ * Report (GET /impact → report): 1 Summary (incl. coverage) · 2 Dependency paths ·
+ * 3 Architecture & layers · 4 User flows / UI impact · 5 Affected files · 6 Explanation & evidence.
+ * Badges: "Graph-confirmed" (a graph edge), "Confirmed by syntax" (an explicit construct such as a
+ * route decorator or JSX), "Inferred" (naming convention or URL match). The client invents nothing.
+ */
+const IMPACT_RELS = ["CALLS", "IMPORTS", "EXTENDS", "IMPLEMENTS"];
+const IMPACT_VERBS = { CALLS: "calls", IMPORTS: "imports", EXTENDS: "extends", IMPLEMENTS: "implements", MEMBER_OF: "is defined in" };
+const UI_LAYERS = ["UI page", "UI component", "UI event handler"];
+
 function impactDepth() {
   const el = $("#impact-depth");
   let d = parseInt(el.value, 10);
@@ -762,31 +795,324 @@ function impactDepth() {
   el.value = d;                                  // show the value actually used
   return d;
 }
+
+/* ----- selected symbol + picker ----- */
+function renderImpactSelection(error) {
+  const box = $("#impact-selected"), picker = $("#impact-picker");
+  const n = state.currentNode;
+  if (error) {
+    box.innerHTML = `<div class="small muted">Selected symbol</div>${statusHtml("error", "Could not load the selected symbol: " + error)}`;
+    picker.hidden = false;
+  } else if (!state.current) {
+    box.innerHTML = `<div class="small muted">Selected symbol</div><div><b>No symbol selected.</b> Search below, or click a node in the graph or a search result.</div>`;
+    picker.hidden = false;
+  } else if (!n || n.uid !== state.current) {
+    box.innerHTML = `<div class="small muted">Selected symbol</div><div class="muted">Loading <code>${h(state.current)}</code>…</div>`;
+  } else {
+    box.innerHTML = `<div class="small muted">Selected symbol</div>
+      <div class="impact-sel-row">${tag(n.label)} <a class="sym target" data-uid="${h(n.uid)}" tabindex="0" role="button" title="Open definition">${h(displayName(n))}</a>
+        ${n.kind ? `<span class="muted small">${h(n.kind)}</span>` : ""}
+        <button type="button" class="ghost small-btn" id="impact-change" title="Pick a different symbol">Change symbol</button></div>
+      <div class="small muted"><code>${h(loc(n) || n.uid)}</code></div>`;
+    picker.hidden = !graph.impactPickerOpen;
+  }
+}
+const impactSearch = debounce(async () => {
+  const q = $("#impact-search").value.trim();
+  const ul = $("#impact-results");
+  const seq = nextSeq("impactSearch");
+  if (!q) { ul.innerHTML = ""; return; }
+  if (!state.repo) { ul.innerHTML = `<li class="muted static">Select a repository first.</li>`; return; }
+  ul.innerHTML = `<li class="muted static">Searching…</li>`;
+  try {
+    const { results } = await api(repoPath(`/search?q=${encodeURIComponent(q)}&limit=12`));
+    if (!isLatest("impactSearch", seq)) return;
+    ul.innerHTML = results.length ? results.map((n) => resultItem(n)).join("") : `<li class="muted static">No indexed symbol matches “${h(q)}”.</li>`;
+  } catch (e) {
+    if (isLatest("impactSearch", seq)) ul.innerHTML = `<li class="static">${statusHtml("error", e.message, "retry-impact-search")}</li>`;
+  }
+}, 220);
+function pickForImpact(uid) {
+  graph.impactPickerOpen = false;
+  $("#impact-search").value = "";
+  $("#impact-results").innerHTML = "";
+  openNode(uid, { tab: "impact" });              // same selection path as a graph click: also centres it in the graph
+}
+
+/* ----- report rendering helpers ----- */
+function basisBadge(basis) {
+  const map = { graph: ["confirmed", "Graph-confirmed"], syntax: ["confirmed", "Confirmed by syntax"],
+                "graph-inferred": ["inferred", "Graph · inferred calls"], heuristic: ["inferred", "Inferred"],
+                caveat: ["caveat", "Potential impact"] };
+  const [cls, label] = map[basis] || ["inferred", "Inferred"];
+  return `<span class="basis ${cls}">${h(label)}</span>`;
+}
+function reachBadge(reach) {
+  return reach === "graph" ? `<span class="basis confirmed">Graph-confirmed path</span>`
+    : `<span class="basis inferred">Inferred link</span>`;
+}
+function symChip(u, rep, target, withLoc = false) {
+  const n = rep.nodes[u] || { uid: u };
+  const name = n.qualname || n.name || n.path || u;
+  const where = loc(n);
+  const a = `<a class="sym${u === target ? " target" : ""}" data-uid="${h(u)}" tabindex="0" role="button" title="${h(where || name)} — open definition">${h(name)}</a>`;
+  return withLoc ? `<span class="node">${a}${where ? `<span class="where">${h(where)}</span>` : ""}</span>` : a;
+}
+function edgeArrow(e) {
+  let label = IMPACT_VERBS[e.type] || String(e.type || "").toLowerCase();
+  if (e.syntax === "jsx-render") label = "renders";
+  else if (e.syntax === "jsx-event") label = `wires ${e.event || "event"}`;
+  else if (e.type === "HTTP") label = `HTTP ${e.detail || ""} · inferred`;
+  const inferred = e.type === "HTTP" || (e.confidence && e.confidence !== "resolved");
+  const lines = e.lines && e.lines.length ? ` · call at line ${e.lines.slice(0, 3).join(", ")}` : "";
+  const conf = e.type !== "HTTP" && e.confidence && e.confidence !== "resolved" ? ` (${e.confidence})` : "";
+  return `<span class="arrow${inferred ? " inferred" : ""}" title="${h(label + conf + lines)}">→ <span class="small">${h(label)}${h(conf)}</span></span>`;
+}
+function chainHtml(nodes, edges, rep, target) {
+  return `<div class="chain">${nodes.map((u, i) => symChip(u, rep, target, true) + (i < edges.length ? edgeArrow(edges[i]) : "")).join("")}</div>`;
+}
+function layerChips(layers) {
+  return (layers || []).map((l) => `<span class="layer ${l.basis === "syntax" ? "confirmed" : "inferred"}" title="${h((l.basis === "syntax" ? "Confirmed by syntax: " : "Inferred: ") + l.evidence)}">${h(l.layer)}${l.basis === "syntax" ? "" : " · inferred"}</span>`).join("");
+}
+function renderInline(text) { return h(text).replace(/`([^`]+)`/g, "<code>$1</code>"); }   /* backticks → <code>; all else escaped */
+
+function renderImpact(r) {
+  const rep = r.report, s = rep.summary, t = s.target, c = rep.coverage, ui = rep.ui;
+  const tn = rep.nodes[t] || r.target;
+  const out = [];
+
+  // 1. Summary (incl. coverage)
+  const notEstablished = [];
+  if (ui.status !== "established") notEstablished.push("UI/API flow");
+  if (!rep.paths.length) notEstablished.push("dependents");
+  const targets = s.targets || [t];
+  const layerNames = [...new Set(rep.layers.map((l) => l.layer))];
+  out.push(`<section class="imp-sec" aria-label="Summary"><h3>Summary</h3>
+    ${targets.length > 1 ? `<div class="imp-head small">Targets: ${targets.map((u) => symChip(u, rep, t, true)).join(" ")}</div>`
+      : `<div class="imp-head">${symChip(t, rep, t)} <span class="muted small"><code>${h(s.location || "")}</code></span></div>`}
+    <div class="chips">${layerChips(s.target_layers) || `<span class="muted small">No architectural layer identified for the selected symbol.</span>`}</div>
+    <div class="stats imp-stats">
+      <div class="stat"><b>${s.direct}</b><span>direct</span></div><div class="stat"><b>${s.transitive}</b><span>transitive</span></div>
+      <div class="stat"><b>${s.files}</b><span>files</span></div><div class="stat"><b>${s.depth}</b><span>depth</span></div>
+    </div>
+    <div class="small">Potentially affected layers: ${layerNames.length ? h(layerNames.join(", ")) : `<span class="muted">none identified</span>`}</div>
+    <div class="small">Relationships followed: ${s.rels.map((x) => `<code>${h(x)}</code>`).join(" ")}${s.seeds > 1 ? ` · includes ${s.seeds - 1} member(s) of the selected ${h(tn.label || "")}` : ""}${c.truncated ? ` · <span class="error">result truncated</span>` : ""}</div>
+    <div class="small muted coverage-line">Coverage: graph version ${c.graph_version}, ${Object.entries(c.languages).map(([k, v]) => `${v} ${h(k)}`).join(", ") || "no"} files indexed; ${c.unresolved_calls_in_scope} unresolved call site(s) not followed${notEstablished.length ? `; not established: ${h(notEstablished.join(", "))}` : ""}.</div>
+  </section>`);
+
+  // 2. Dependency paths (grouped by entry point)
+  if (rep.paths.length) {
+    const groups = new Map();
+    rep.paths.forEach((p) => { if (!groups.has(p.root)) groups.set(p.root, []); groups.get(p.root).push(p); });
+    out.push(`<section class="imp-sec"><h3>Dependency paths <span class="muted small">(${rep.paths.length}, ${groups.size} entry point${groups.size > 1 ? "s" : ""})</span></h3>
+      ${[...groups.entries()].map(([root, ps], gi) => `<details class="imp-group" ${gi < 4 ? "open" : ""}><summary>${symChip(root, rep, t)} ${layerChips(((rep.nodes[root] || {}).layers || []).slice(0, 2))}
+        <span class="muted small">${ps.length} path${ps.length > 1 ? "s" : ""}</span></summary>
+        ${ps.map((p) => `<div class="imp-path"><span class="kind ${p.kind}">${p.kind === "direct" ? "Direct" : "Transitive"}</span>
+          ${p.confidence === "resolved" ? basisBadge("graph") : `<span class="conf ${h(p.confidence)}" title="includes heuristic call resolution">graph · ${h(p.confidence)} calls</span>`}
+          ${chainHtml(p.nodes, p.edges, rep, t)}</div>`).join("")}</details>`).join("")}</section>`);
+  } else {
+    out.push(`<section class="imp-sec"><h3>Dependency paths</h3><div class="muted">No dependents found following ${h(s.rels.join(", "))} up to depth ${s.depth}. Try a greater depth or more relationship types.</div></section>`);
+  }
+
+  // 3. Architecture & layers
+  out.push(`<section class="imp-sec"><h3>Architecture &amp; layers</h3>${rep.layers.length ? rep.layers.map((l) => `
+    <details class="imp-group"><summary><b>${h(l.layer)}</b> <span class="muted small">${l.members.length} · ${l.confirmed} confirmed by syntax, ${l.inferred} inferred</span></summary>
+      <ul class="imp-list">${l.members.map((m) => `<li>${symChip(m.uid, rep, t, true)} ${basisBadge(m.basis)} ${reachBadge(m.reach)}
+        <div class="small muted">${h(m.evidence)}</div></li>`).join("")}</ul>
+    </details>`).join("") : `<div class="muted small">No architectural layer could be identified among the dependents. Nothing is guessed.</div>`}</section>`);
+
+  // 4. User flows / UI impact
+  const uiPaths = rep.paths.filter((p) => p.nodes.some((u) => ((rep.nodes[u] || {}).layers || []).some((l) => UI_LAYERS.includes(l.layer))));
+  out.push(`<section class="imp-sec"><h3>User flows / UI impact</h3>
+    ${ui.status === "established"
+      ? `<div class="notice ok">${h(ui.message)}</div>
+         ${ui.flows.map((f) => `<div class="imp-path">${chainHtml(f.nodes, f.edges, rep, t)}<div class="small muted">${basisBadge("heuristic")} ${h(f.link.call)} ⇢ ${h(f.link.route)}: ${h(f.link.rule)}</div></div>`).join("")}
+         ${!ui.flows.length ? uiPaths.slice(0, 5).map((p) => `<div class="imp-path">${basisBadge("graph")}${chainHtml(p.nodes, p.edges, rep, t)}</div>`).join("") : ""}`
+      : `<div class="notice ${ui.status === "no_frontend" ? "muted" : "warn"}"><b>Not established from indexed code.</b> ${h(ui.message)}</div>`}
+  </section>`);
+
+  // 5. Affected files, with their affected symbols and line references
+  const byFile = new Map();
+  Object.values(rep.nodes).filter((n) => n.depth > 0 && n.path).forEach((n) => {
+    if (!byFile.has(n.path)) byFile.set(n.path, []);
+    byFile.get(n.path).push(n);
+  });
+  out.push(`<section class="imp-sec"><h3>Affected files</h3>${byFile.size ? `<ul class="imp-files">${[...byFile.entries()]
+    .sort((a, b) => b[1].length - a[1].length || (a[0] < b[0] ? -1 : 1)).map(([path, ns]) => `<li>
+      <a data-uid="${h("file:" + path)}" tabindex="0" role="button" title="Open ${h(path)}">${h(path)}</a> <span class="muted small">${ns.length} symbol${ns.length > 1 ? "s" : ""}</span>
+      <div class="chips">${ns.sort((a, b) => (a.line_start || 0) - (b.line_start || 0)).map((n) => `${symChip(n.uid, rep, t)}<span class="where">${n.line_start ? "L" + n.line_start + (n.line_end && n.line_end !== n.line_start ? "–" + n.line_end : "") : ""}</span>`).join(" ")}</div>
+    </li>`).join("")}</ul>` : `<div class="muted small">No affected files (no dependents found).</div>`}</section>`);
+
+  // 6. Explanation & evidence
+  const ins = rep.inspection;
+  out.push(`<section class="imp-sec"><h3>Suggested inspection</h3>
+    ${ins.callers.length ? `<div class="small">Direct callers: ${ins.callers.map((u) => symChip(u, rep, t, true)).join(" ")}</div>` : `<div class="small muted">No direct callers.</div>`}
+    ${ins.files.length ? `<div class="small">Files with the most affected symbols: ${ins.files.slice(0, 5).map((f) => `<a data-uid="${h("file:" + f.path)}" tabindex="0" role="button">${h(f.path)}</a> (${f.symbols})`).join(", ")}</div>` : ""}
+    ${ins.tests.length ? `<div class="small">Tests reaching it:</div><ul class="imp-list">${ins.tests.map((x) =>
+      `<li>${symChip(x.uid, rep, t, true)} ${basisBadge(x.basis)} <span class="small muted">${h(x.evidence)}</span></li>`).join("")}</ul>`
+      : `<div class="small muted">${h(ins.tests_note || "")}</div>`}
+  </section>`);
+  out.push(`<section class="imp-sec"><h3>Explanation &amp; evidence</h3>
+    <div class="small muted">Potential impact derived from graph paths, not verified breakage.</div>
+    <ul class="imp-list">${rep.explanation.map((e) => `<li>${basisBadge(e.basis)} ${renderInline(e.text)}</li>`).join("")}</ul>
+    ${rep.behaviors.length ? `<h4>Potentially affected behaviour</h4><ul class="imp-list">${rep.behaviors.map((b) =>
+      `<li>${basisBadge(b.basis)} ${renderInline(b.text)} <span class="small muted" title="${h(b.evidence)}">(${h(b.layer)})</span></li>`).join("")}</ul>` : ""}
+    <details class="imp-group"><summary><b>Evidence &amp; coverage</b></summary>
+      <ul class="imp-list small">
+        <li>Graph version ${c.graph_version}: ${h(c.facts_source)}${c.derived_nodes ? ` (${c.derived_nodes} symbol(s) read from stored source)` : ""}</li>
+        <li>${c.files_in_repo} files indexed · ${c.frontend_files} JSX/TSX files · ${c.api_clients_found} JS/TS API client(s)</li>
+        <li>Edge confidence along the paths: ${Object.entries(c.edge_confidence).map(([k, v]) => `${v} ${h(k)}`).join(", ") || "—"}</li>
+        <li>${c.unresolved_calls_in_scope} call site(s) in the analysed code could not be resolved and were not followed.</li>
+        ${c.not_analysed.map((x) => `<li class="muted">Not analysed: ${h(x)}</li>`).join("")}
+      </ul></details>
+  </section>`);
+  return out.join("");
+}
+
+/* A server that predates the report still returns the legacy list: say so instead of failing. */
+function renderLegacyImpact(r) {
+  return `<div class="notice warn">This server returned impact data without the expanded report, so it is running an older
+    Ariadne version. Restart it (<code>python -m uvicorn app:app</code>) to get dependency paths, layers and UI impact.</div>
+    <div>${r.impacted.length} dependent(s):</div><ul class="results">${r.impacted.map((n) => resultItem(n, ` <span class="muted small">depth ${h(n.depth)}</span>`)).join("")}</ul>`;
+}
+
 async function runImpact() {
-  if (!state.current) { $("#impact").textContent = "Select a symbol first."; return; }
+  if (!state.current || !state.currentNode || state.currentNode.uid !== state.current) {
+    $("#impact").innerHTML = statusHtml("error", "Pick a symbol in “Or analyze one specific symbol”, or describe a change above.");
+    return;
+  }
   if (state.busy.impact) return;
+  const rels = selectedRels().filter((x) => IMPACT_RELS.includes(x));
+  if (!rels.length) {
+    $("#impact").innerHTML = statusHtml("error", "Tick at least one of calls, imports, extends or implements above the graph: impact follows those relationships.");
+    return;
+  }
   const seq = nextSeq("impact"), uid = state.current, depth = impactDepth();
   state.busy.impact = true; updateActions();
-  $("#impact").textContent = "Analyzing…";
+  $("#impact").innerHTML = `<div class="muted">Analyzing dependents of <b>${h(displayName(state.currentNode))}</b> (depth ${depth})…</div>`;
   try {
-    const r = await api(repoPath(`/impact?uid=${encodeURIComponent(uid)}&depth=${depth}`));
+    const r = await api(repoPath(`/impact?uid=${encodeURIComponent(uid)}&depth=${depth}&rels=${rels.join(",")}`));
     if (!isLatest("impact", seq)) return;
-    if (!r.impacted.length) { $("#impact").innerHTML = `<div>No dependents of <b>${h(displayName(r.target))}</b> found within depth ${r.depth}.</div>`; return; }
-    const byDepth = {};
-    r.impacted.forEach((n) => (byDepth[n.depth] = byDepth[n.depth] || []).push(n));
-    const conf = Object.entries(r.by_confidence).map(([k, v]) => `${v} ${k}`).join(" · ");
-    $("#impact").innerHTML = `<div><b>${r.impacted.length}</b> dependents across <b>${r.affected_files.length}</b> files <span class="muted small">(${h(conf)})</span></div>
-      ${r.truncated ? `<div class="notice">Result truncated.</div>` : ""}
-      ${Object.entries(byDepth).map(([d, ns]) => `<div class="depth">depth ${h(d)}</div><ul class="results">${ns.map((n) => resultItem(n, ` <span class="muted small">via ${h(n.via)}</span>` + confBadge(n.confidence))).join("")}</ul>`).join("")}
-      <h3>Affected files</h3><ul class="kv">${r.affected_files.map((f) => `<li><span>${h(f.path)}</span><span>${f.symbols}</span></li>`).join("")}</ul>`;
-    const nodes = [r.target, ...r.impacted];
-    const edges = r.impacted.map((n) => ({ src: n.uid, dst: n.from, type: n.via, confidence: n.confidence }));
-    showAnalysisGraph("impact", nodes.filter((n) => n.uid), edges, r.target.uid,
-      `Impact of ${displayName(r.target)} · ${r.impacted.length} dependents (depth ${r.depth})`);
+    $("#impact").innerHTML = r.report ? renderImpact(r) : renderLegacyImpact(r);
+    if (r.impacted.length) {
+      const nodes = [r.target, ...r.impacted];
+      const edges = r.impacted.flatMap((n) => (n.parents && n.parents.length ? n.parents : [{ to: n.from, type: n.via, confidence: n.confidence }])
+        .map((p) => ({ src: n.uid, dst: p.to, type: p.type, confidence: p.confidence })));
+      showAnalysisGraph("impact", nodes.filter((n) => n.uid), edges, r.target.uid,
+        `Impact of ${displayName(r.target)} · ${r.impacted.length} dependents (depth ${r.depth})`);
+    }
   } catch (e) {
     if (isLatest("impact", seq)) $("#impact").innerHTML = statusHtml("error", e.message, "retry-impact");
   } finally {
     if (isLatest("impact", seq)) { state.busy.impact = false; updateActions(); }
+  }
+}
+
+/* ---------------- impact scenario (primary workflow) ----------------
+ * POST /impact/scenario {scenario, targets?, depth, rels, use_model}
+ *   → resolution {status: analyzed | needs_confirmation | no_match, candidates, notes, model}
+ *   → report (same deterministic impact report as the symbol workflow) when targets are settled.
+ * Targets are never chosen silently: weak/ambiguous matches come back for confirmation, and the
+ * user can always tick/untick candidates and re-analyze.
+ */
+const SCENARIO_EXAMPLES = [
+  "If I change the message format returned by the API, what could be affected?",
+  "What happens if authentication middleware changes?",
+  "If I rename this field in the user model, which routes, services, and UI components depend on it?",
+  "If I change the retry behavior, what functions and tests should I inspect?",
+  "What could break if this API response becomes nullable?",
+];
+const CONF_ORDER = { high: 0, medium: 1, low: 2 };
+
+function renderScenarioExamples(hotspot) {
+  const ex = (hotspot ? [`If I change ${hotspot}, what could be affected?`] : []).concat(SCENARIO_EXAMPLES);
+  $("#impact-examples").innerHTML = ex.map((t) => `<button type="button" class="chip-btn" data-example="${h(t)}" title="Use this example">${h(t)}</button>`).join("");
+}
+function scenarioText() { return $("#impact-scenario").value.trim(); }
+
+function renderTargets(resp) {
+  const res = resp.resolution;
+  const cands = res.candidates || [];
+  const status = { analyzed: "ok", needs_confirmation: "warn", no_match: "muted" }[res.status] || "warn";
+  const model = res.model || {};
+  const rows = cands.map((c) => `<li class="target-row">
+      <label class="target-pick"><input type="checkbox" data-target="${h(c.uid)}" ${c.selected || (res.status === "needs_confirmation" && c.suggested) ? "checked" : ""}
+        aria-label="Use ${h(c.qualname || c.name || c.uid)} as a target"></label>
+      <div class="target-body">
+        <div>${tag(c.label)} <a class="sym" data-uid="${h(c.uid)}" tabindex="0" role="button" title="Open definition">${h(c.qualname || c.name || c.path || c.uid)}</a>
+          <span class="conf-badge ${h(c.confidence)}">${h(c.confidence)} confidence</span>
+          ${c.ambiguous ? `<span class="basis inferred" title="Several symbols share this name">ambiguous</span>` : ""}
+          ${c.model_suggested ? `<span class="basis inferred" title="${h(c.model_reason || "")}">model-ranked</span>` : ""}</div>
+        <div class="where">${h(loc(c) || c.uid)}</div>
+        <div class="small muted">${h(c.match)} match · ${h((c.reasons || []).join("; "))}</div>
+      </div></li>`).join("");
+  return `<section class="imp-sec" aria-label="Matched targets"><h3>Matched targets</h3>
+    <div class="notice ${status}">${h(res.message)}</div>
+    ${cands.length ? `<ul class="imp-list targets">${rows}</ul>
+      <button type="button" class="ghost" id="impact-reanalyze">Analyze selected targets</button>` : ""}
+    ${res.unmatched && res.unmatched.length ? `<div class="small muted">Not found in the graph: ${res.unmatched.map((u) => `<code>${h(u)}</code>`).join(", ")}</div>` : ""}
+    ${res.concepts && res.concepts.length ? `<div class="small muted">Concepts recognised: ${h(res.concepts.join(", "))} (offered only where indexed syntax confirms them)</div>` : ""}
+    ${model.used ? `<div class="small muted">Meta model ${h(model.model || "")}: ranked ${(model.picked || []).length} of the candidates shown to it${model.rejected && model.rejected.length ? `; rejected ${model.rejected.length} reference(s) to things not in the candidate list` : ""}${model.error ? ` · ${h(model.error)}` : ""}.</div>` : ""}
+    ${(res.notes || []).map((n) => `<div class="notice">${h(n)}</div>`).join("")}
+  </section>`;
+}
+
+function renderScenario(resp) {
+  const parts = [`<section class="imp-sec" aria-label="Scenario"><h3>Scenario</h3>
+    <div class="scenario-text">${h(resp.scenario)}</div>
+    <div class="small muted">Repository: ${h(resp.repo.label)} · read-only analysis of the indexed graph</div></section>`,
+    renderTargets(resp)];
+  if (resp.report) parts.push(renderImpact(resp.report));
+  return parts.join("");
+}
+
+function checkedTargets() { return $$("#impact input[data-target]:checked").map((i) => i.dataset.target); }
+function updateReanalyze() {
+  const btn = document.getElementById("impact-reanalyze");   // rendered with the matched targets
+  if (btn) { const n = checkedTargets().length; btn.disabled = !n || state.busy.scenario; btn.textContent = n ? `Analyze ${n} selected target${n > 1 ? "s" : ""}` : "Select at least one target"; }
+}
+
+let scenarioTimer;
+async function runScenario(targets) {
+  const text = scenarioText();
+  if (!state.repo) { $("#impact").innerHTML = statusHtml("error", "Select a repository first."); return; }
+  if (!text) { $("#impact").innerHTML = statusHtml("error", "Describe the change you’re considering first."); $("#impact-scenario").focus(); return; }
+  if (state.busy.scenario) return;
+  const rels = selectedRels().filter((x) => IMPACT_RELS.includes(x));
+  if (!rels.length) {
+    $("#impact").innerHTML = statusHtml("error", "Tick at least one of calls, imports, extends or implements above the graph: impact follows those relationships.");
+    return;
+  }
+  const seq = nextSeq("scenario"), depth = impactDepth(), useModel = $("#impact-use-model").checked;
+  state.busy.scenario = true; state.lastScenarioTargets = targets || null; updateActions();
+  const started = Date.now();
+  const progress = () => {
+    const s = Math.round((Date.now() - started) / 1000);
+    $("#impact").innerHTML = `<div class="muted">${targets ? `Analyzing ${targets.length} selected target(s)` : "Matching your description to indexed symbols"} (depth ${depth})… ${s}s
+      ${!targets && useModel && s >= 3 ? `<div class="small">If there is no exact match, the Meta model is ranking real candidates; this can take up to a minute.</div>` : ""}</div>`;
+  };
+  progress(); clearInterval(scenarioTimer); scenarioTimer = setInterval(progress, 1000);
+  try {
+    const body = { scenario: text, depth, rels, use_model: useModel, ...(targets ? { targets } : {}) };
+    const r = await api(repoPath("/impact/scenario"), { method: "POST", body: JSON.stringify(body) });
+    if (!isLatest("scenario", seq)) return;
+    clearInterval(scenarioTimer);
+    $("#impact").innerHTML = renderScenario(r);
+    updateReanalyze();
+    const rep = r.report;
+    // No report (targets still to confirm / no match): don't leave an earlier impact on the canvas.
+    if ((!rep || !rep.impacted.length) && graph.mode === "impact") showOverviewGraph();
+    if (rep && rep.impacted.length) {
+      const nodes = [...rep.targets, ...rep.impacted];
+      const edges = rep.impacted.flatMap((n) => (n.parents && n.parents.length ? n.parents : [{ to: n.from, type: n.via, confidence: n.confidence }])
+        .map((p) => ({ src: n.uid, dst: p.to, type: p.type, confidence: p.confidence })));
+      showAnalysisGraph("impact", nodes.filter((n) => n.uid), edges, rep.target.uid,
+        `Impact of scenario · ${rep.targets.length} target(s) · ${rep.impacted.length} dependents (depth ${rep.depth})`);
+    }
+  } catch (e) {
+    if (isLatest("scenario", seq)) { clearInterval(scenarioTimer); $("#impact").innerHTML = statusHtml("error", e.message, "retry-scenario"); }
+  } finally {
+    if (isLatest("scenario", seq)) { state.busy.scenario = false; updateActions(); updateReanalyze(); }
   }
 }
 
@@ -942,6 +1268,8 @@ const ACTIONS = {
   "retry-impact": () => runImpact(),
   "retry-path": () => runPath(state.lastPathDst),
   "retry-path-search": () => pathSearch(),
+  "retry-impact-search": () => impactSearch(),
+  "retry-scenario": () => runScenario(state.lastScenarioTargets || undefined),
   "retry-ask": () => ask(),
 };
 
@@ -956,8 +1284,17 @@ document.addEventListener("DOMContentLoaded", () => {
   $("#search-kind").addEventListener("change", doSearch);
   $("#ask-form").addEventListener("submit", ask);
   $("#ask-input").addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) ask(e); });
-  $("#impact-btn").addEventListener("click", runImpact);
+  $("#impact-btn").addEventListener("click", () => runScenario());
+  $("#impact-symbol-btn").addEventListener("click", runImpact);
+  $("#impact-scenario").addEventListener("input", updateActions);
+  $("#impact-scenario").addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); runScenario(); } });
+  $("#impact").addEventListener("change", (e) => { if (e.target.matches("input[data-target]")) updateReanalyze(); });
   $("#impact-depth").addEventListener("change", impactDepth);
+  $("#impact-search").addEventListener("input", impactSearch);
+  $("#impact-search").addEventListener("keydown", (e) => {        // Enter picks the first result
+    const first = $("#impact-results li[data-uid]");
+    if (e.key === "Enter" && first) { e.preventDefault(); pickForImpact(first.dataset.uid); }
+  });
   $("#impact-depth").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); runImpact(); } });
   $("#path-target").addEventListener("input", pathSearch);
   $("#path-undirected").addEventListener("change", () => state.lastPathDst && runPath(state.lastPathDst));
@@ -986,10 +1323,19 @@ document.addEventListener("DOMContentLoaded", () => {
       if (li) { li.scrollIntoView({ behavior: "smooth", block: "center" }); li.classList.add("flash"); setTimeout(() => li.classList.remove("flash"), 1200); }
       return;
     }
+    const ex = e.target.closest("[data-example]");
+    if (ex) { $("#impact-scenario").value = ex.dataset.example; updateActions(); $("#impact-scenario").focus(); return; }
+    if (e.target.closest("#impact-reanalyze")) { const t = checkedTargets(); if (t.length) runScenario(t); return; }
+    if (e.target.closest("#impact-change")) {
+      graph.impactPickerOpen = true; renderImpactSelection(); $("#impact-search").focus(); return;
+    }
+    const impactPick = e.target.closest("#impact-results li[data-uid]");
+    if (impactPick) { pickForImpact(impactPick.dataset.uid); return; }
     const pathPick = e.target.closest("#path-results li[data-uid]");
     if (pathPick) { runPath(pathPick.dataset.uid); return; }
     const item = e.target.closest("[data-uid]");
     if (item && item.dataset.uid) {
+      if (item.closest("summary")) e.preventDefault();   // open the symbol, don't toggle its <details> group
       // Results inside Impact/Path belong to that analysis: open the clicked symbol in Definition.
       const fromAnalysis = item.closest("[data-pane=impact], [data-pane=path]");
       openNode(item.dataset.uid, fromAnalysis ? { tab: "detail" } : {});

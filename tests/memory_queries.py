@@ -18,7 +18,7 @@ from ariadne.store import node_rows
 
 
 class MemoryQueries(GraphQueries):
-    def __init__(self, graph, repo_id: str = "github__acme__shop"):
+    def __init__(self, graph, repo_id: str = "github__acme__shop", graph_version: int = 2):
         super().__init__(store=None, repo_id=repo_id)
         self.graph = graph
         self.by_uid: dict[str, dict] = {}
@@ -28,6 +28,9 @@ class MemoryQueries(GraphQueries):
         self.edges = [(e.type, e.src, e.dst, dict(e.props)) for e in graph.edges]
         self.repo = {"id": repo_id, "url": "https://github.com/acme/shop", "name": "shop",
                      "owner": "acme", "status": "ready", "commit": "abc123"}
+        if graph_version >= 2:
+            self.repo["graph_version"] = graph_version
+        self.files = [(f.path, f.language) for f in graph.files]
 
     # -- primitives ------------------------------------------------------
     def q(self, cypher, **params):
@@ -66,6 +69,51 @@ class MemoryQueries(GraphQueries):
             elif reverse and d in fs:
                 out.append((d, t, p.get("confidence"), s))
         return sorted(out, key=lambda r: (r[0], r[1], r[3]))
+
+    def _expand_edges(self, frontier, rels):
+        fs = set(frontier)
+        out = []
+        for t, s, d, p in self.edges:
+            if t in rels and d in fs:
+                out.append((d, t, p.get("confidence"), s,
+                            {"lines": p.get("lines"), "syntax": p.get("syntax"), "event": p.get("event")}))
+        return sorted(out, key=lambda r: (r[0], r[1], r[3]))
+
+    def repo_files(self):
+        return list(self.files)
+
+    def http_client_nodes(self, indexed_facts):
+        if indexed_facts:
+            return [dict(n) for n in self.by_uid.values() if n["labels"][0] == "Function" and n.get("http_calls")]
+        return [dict(n) for n in self.by_uid.values() if n["labels"][0] == "Function"
+                and any(k in (n.get("source") or "") for k in ("fetch(", "axios.", "client."))]
+
+    def _layer_candidates(self, layer, indexed_facts):
+        nodes = list(self.by_uid.values())
+        fn = lambda n: n["labels"][0] == "Function"
+        if layer in ("HTTP route", "Background job / event handler"):
+            pick = [n for n in nodes if fn(n) and (n.get("decorators") if indexed_facts else
+                                                   n.get("language") == "python" and (n.get("source") or "").startswith("@"))]
+        elif layer == "UI component":
+            pick = [n for n in nodes if n.get("renders_jsx")] if indexed_facts else []
+        elif layer == "Data model / schema":
+            pick = [n for n in nodes if n["labels"][0] == "Class"]
+        elif layer == "External service / database":
+            pick = [n for n in nodes if fn(n) and n.get("external_calls")]
+        elif layer == "API client":
+            return self.http_client_nodes(indexed_facts)
+        else:
+            pick = []
+        return [dict(n) for n in pick]
+
+    def as_old_graph(self):
+        """Simulate a repository indexed before graph_version 2: no indexed facts, no JSX edges."""
+        self.repo.pop("graph_version", None)
+        for n in self.by_uid.values():
+            for k in ("decorators", "http_calls", "renders_jsx"):
+                n.pop(k, None)
+        self.edges = [(t, s, d, p) for t, s, d, p in self.edges if not p.get("syntax", "").startswith("jsx")]
+        return self
 
     # -- simple Python equivalents ----------------------------------------
     def _rel(self, uid, types, outgoing):

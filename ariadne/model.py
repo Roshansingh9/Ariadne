@@ -19,6 +19,8 @@ class CallSite:
     receiver: Optional[str]        # receiver text for member calls ("self", "os.path", "repo") or None
     line: int                      # 1-based
     is_new: bool = False           # JS `new X()`
+    jsx: Optional[str] = None      # "render" for <X/>, "event" for onClick={x}: a JSX reference, not a call
+    event: Optional[str] = None    # JSX attribute name for jsx == "event" (e.g. "onClick")
 
 
 @dataclass
@@ -54,6 +56,10 @@ class Symbol:
     var_types: dict[str, str] = field(default_factory=dict)   # local var -> constructor expr
     unresolved_calls: list[str] = field(default_factory=list)
     external_calls: list[str] = field(default_factory=list)
+    # Architectural facts read from syntax at index time (see ariadne/frameworks.py).
+    decorators: list[str] = field(default_factory=list)   # Python decorator texts
+    http_calls: list[str] = field(default_factory=list)   # "POST /api/orders" (fetch/axios/test clients)
+    renders_jsx: bool = False                             # body contains JSX
 
 
 @dataclass

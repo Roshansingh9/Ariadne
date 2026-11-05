@@ -65,6 +65,28 @@ Node ids (`uid`) are `file:<path>`, `<path>::<Qualified.name>` or `pkg:<lang>:<n
 4. Citations are validated. References to unknown evidence ids are removed and reported.
 5. If nothing matches, no model call is made. If the Meta API is unavailable, the response is a deterministic `graph_only` summary with the error. **No other model provider is ever used, and model output is never executed as Cypher.**
 
+## Impact analysis
+
+`GET /api/repos/{id}/impact?uid=…&depth=1-6&rels=CALLS,IMPORTS,EXTENDS,IMPLEMENTS` walks dependents in reverse and returns a `report` built **deterministically** from graph facts (no model is used). The Impact tab follows the relationship filters ticked above the graph.
+
+- **Summary:** direct and transitive dependents, affected files, depth, relationships. A class or file also includes its members.
+- **Dependency paths:** every dependent on at least one path to the selected symbol, with multiple callers and alternative paths (e.g. a route that calls it directly *and* through a helper). Cycles never repeat a node, and no path is longer than the depth.
+- **Architecture & layers**, **user flows / UI impact**, **behaviour**, **affected files**, **explanation**, **suggested inspection** and **evidence & coverage**.
+
+Every item says how it is known:
+
+| Basis | Examples |
+|---|---|
+| **confirmed · graph** | a `CALLS`/`IMPORTS`/`EXTENDS`/`IMPLEMENTS` edge (with its own resolved / inferred / ambiguous confidence) |
+| **confirmed · syntax** | route decorators (`@app.post("/x")`, `@bp.route(..., methods=[...])`), job decorators (`@celery.task`, `@shared_task`, `@app.on_event`), `fetch`/`axios` calls with a literal URL, JSX `<Component/>` renders and `onClick={handler}` wiring, model base classes (`BaseModel`, `SQLModel`, …), external-service calls (`requests`, `boto3`, `redis`, …) |
+| **inferred** | path/name conventions (`services/`, `utils.py`, `tests/`, `pages/`), and **UI → API links**: a client's URL and method matched to a route path. These are never graph edges. |
+
+"UI impact not established — no frontend code found in this repository." is shown when there are no `.tsx`/`.jsx` files and no JS/TS API clients. "UI/API relationship not established from indexed code." is shown when frontend code exists but nothing links it to the selected symbol. Graph connectivity indicates **potential** impact, never verified breakage. Tests are listed only when a graph path or a URL match connects them.
+
+**Not analysed:** routes declared outside decorators (Django `urls.py`, `add_url_rule`, Express `app.get`), URLs built at runtime, API clients other than `fetch`/`axios`/test clients/`requests`/`httpx`, dependency injection, reflection, dynamic dispatch, event buses and cross-repository calls.
+
+**Compatibility.** Graphs indexed by this version are stamped `graph_version: 2`. Their symbols carry `decorators`, `http_calls` and `renders_jsx`, and JSX `CALLS` edges carry `syntax` (`jsx-render` / `jsx-event`). Existing graphs need no migration: impact works unchanged, and routes, jobs and HTTP calls are read from each symbol's stored source (its first 60 lines). JSX render/event links exist only in graphs indexed by this version, and the report says so. They appear the next time you index a repository normally; nothing is re-indexed automatically.
+
 ## Tests
 
 ```bash

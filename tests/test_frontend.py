@@ -229,3 +229,71 @@ def test_full_names_on_hover_and_edge_types_only_when_highlighted():
     assert '$("#graph-canvas").onmouseleave = () => highlight(null);' in draw   # no stuck hover
     assert 'label: "", "font-size": 9' in draw and '{ selector: "edge.hl", style: { label: "data(type)"' in draw
     assert "name.textContent = node.data(\"full\")" in _fn_body(js, "showTip")   # textContent: never HTML
+
+
+# --- Impact panel wiring --------------------------------------------------------------------
+
+def test_impact_respects_graph_filters_and_depth():
+    body = _fn_body(_js(), "runImpact")
+    assert 'selectedRels().filter((x) => IMPACT_RELS.includes(x))' in body
+    assert "&rels=${rels.join(\",\")}" in body and "depth=${depth}" in body
+    assert body.index("if (!rels.length)") < body.index("await api(")          # no request without relationships
+    assert "Tick at least one of calls, imports, extends or implements" in body
+    assert "renderImpact(r)" in body and 'statusHtml("error", e.message, "retry-impact")' in body
+
+
+def test_impact_report_sections_and_escaping():
+    body = _fn_body(_js(), "renderImpact")
+    for title in ("Dependency paths", "Architecture &amp; layers", "User flows / UI impact", "Potentially affected behaviour",
+                  "Affected files", "Explanation", "Suggested inspection", "Evidence &amp; coverage"):
+        assert title in body, title
+    assert "renderInline(" in body and "function renderInline(text) { return h(text)" in _js()
+    assert 'if (item.closest("summary")) e.preventDefault();' in _js()          # chip in a group header opens, doesn't toggle
+
+
+def test_impact_tab_has_selected_symbol_and_picker():
+    html = (PUBLIC / "index.html").read_text(encoding="utf-8")
+    pane = html.split('data-pane="impact"')[1].split("</section>")[0]
+    for elem in ('id="impact-selected"', 'id="impact-picker"', 'id="impact-search"', 'id="impact-results"',
+                 'id="impact-depth"', 'id="impact-btn"'):
+        assert elem in pane, elem
+    js = _js()
+    assert "/search?q=${encodeURIComponent(q)}" in _fn_body(js, "renderImpactSelection") or \
+        'repoPath(`/search?q=${encodeURIComponent(q)}&limit=12`)' in js          # real indexed search only
+    pick = _fn_body(js, "pickForImpact")
+    assert 'openNode(uid, { tab: "impact" })' in pick                          # same path as a graph click
+    node = _fn_body(js, "openNode")
+    assert "state.currentNode = { ...d.node, uid };" in node and node.count("renderImpactSelection(") >= 2
+    assert 'const impactPick = e.target.closest("#impact-results li[data-uid]");' in js
+    assert "state.currentNode = null;" in _fn_body(js, "selectRepo")
+
+
+def test_impact_needs_a_loaded_selection_and_handles_legacy_servers():
+    js = _js()
+    run = _fn_body(js, "runImpact")
+    assert run.index("state.currentNode.uid !== state.current") < run.index("await api(")
+    assert "r.report ? renderImpact(r) : renderLegacyImpact(r)" in run
+
+
+# --- Impact: natural-language scenario is the primary workflow -------------------------------
+
+def test_scenario_is_the_primary_impact_input():
+    html = (PUBLIC / "index.html").read_text(encoding="utf-8")
+    pane = html.split('data-pane="impact"')[1].split('data-pane="path"')[0]
+    assert pane.index('id="impact-scenario"') < pane.index('id="impact-btn"') < pane.index('id="impact-symbol-mode"')
+    assert 'placeholder="Describe the change you’re considering…"' in pane
+    assert '<details class="imp-symbol" id="impact-symbol-mode">' in pane               # symbol picker is secondary
+    assert 'id="impact-examples"' in pane and 'id="impact-repo"' in pane and 'id="impact-advanced"' in pane
+    assert "Select a symbol first" not in pane and "select a symbol first" not in _js().lower()
+
+
+def test_scenario_flow_wiring():
+    js = _js()
+    run = _fn_body(js, "runScenario")
+    assert 'repoPath("/impact/scenario"), { method: "POST"' in run and "...(targets ? { targets } : {})" in run
+    assert "if (state.busy.scenario) return;" in run and 'nextSeq("scenario")' in run and '"retry-scenario"' in run
+    assert 'selectedRels().filter((x) => IMPACT_RELS.includes(x))' in run and "use_model: useModel" in run
+    assert '$("#impact-btn").addEventListener("click", () => runScenario());' in js
+    assert 'if (e.target.closest("#impact-reanalyze")) { const t = checkedTargets(); if (t.length) runScenario(t); return; }' in js
+    assert '$("#impact-scenario").value = ex.dataset.example;' in js                    # example chips fill the input
+    assert '$("#impact").innerHTML' not in _fn_body(js, "openNode")                     # opening a symbol keeps the report

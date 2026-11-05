@@ -455,14 +455,20 @@ class Resolver:
                             external.append(ext)
                         continue
                     if not targets:
+                        if getattr(site, "jsx", None):
+                            continue          # an unresolved <Tag/> or onX={ref} is not an unresolved *call*
                         label = f"{site.receiver}.{site.name}" if site.receiver else site.name
                         label = label[-60:]
                         if label not in unresolved:
                             unresolved.append(label)
                         continue
+                    props = {"line": site.line, "resolution": how, "confidence": conf}
+                    if getattr(site, "jsx", None):
+                        props["syntax"] = f"jsx-{site.jsx}"          # renders <X/> / wires onX={x}
+                        if site.event:
+                            props["event"] = site.event
                     for t in targets:
-                        self._edge("CALLS", src, t.uid,
-                                   {"line": site.line, "resolution": how, "confidence": conf})
+                        self._edge("CALLS", src, t.uid, props)
                 holder = scope if scope is not None else f
                 holder.unresolved_calls = unresolved[:MAX_UNRESOLVED_PER_SCOPE]
                 holder.external_calls = external[:MAX_UNRESOLVED_PER_SCOPE]

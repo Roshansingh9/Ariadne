@@ -24,6 +24,7 @@ MAX_PATH_DEPTH = 8
 MAX_IMPACT_DEPTH = 6
 MAX_FRONTIER = 400
 MAX_IMPACT_NODES = 300
+MAX_IMPACT_TARGETS = 10
 MAX_GRAPH_NODES = 400          # repository-graph view: nodes drawn at most
 GRAPH_EDGE_SCAN = 20000        # repository-graph view: edges read at most to rank nodes
 CONF_RANK = {"resolved": 3, "inferred": 2, "ambiguous": 1, None: 3}
@@ -325,28 +326,50 @@ class GraphQueries:
                 "nodes": [brief(info[u]) for u in uids if u in info], "hops": hops}
 
     def impact(self, uid: str, depth: int = 3, rels=None) -> dict:
+        return self.impact_many([uid], depth, rels)
+
+    def impact_many(self, uids: list[str], depth: int = 3, rels=None) -> dict:
+        """Reverse impact from one or more targets. Read-only.
+
+        Each Class/File target also seeds the members it defines; `seed_owner` maps every seed
+        back to the target it belongs to, so paths can say "is defined in <target>"."""
         rels = validate_rels(rels, IMPACT_RELS)
         depth = clamp(depth, 1, MAX_IMPACT_DEPTH, 3)
-        target = self.node(uid)
-        seeds = [uid]
-        label = label_of(target)
-        if label in ("Class", "File"):
-            # A change to a class/file also affects the members it defines.
-            members = self.q("MATCH (n:Entity {uid: $uid})-[:DEFINES*1..3]->(m) RETURN m.uid LIMIT 400",
-                             uid=uid)
-            seeds += [r[0] for r in members]
+        uids = list(dict.fromkeys(u for u in uids if u))
+        if not uids:
+            raise ValueError("No impact target given.")
+        if len(uids) > MAX_IMPACT_TARGETS:
+            raise ValueError(f"At most {MAX_IMPACT_TARGETS} impact targets at once.")
+        found = self.nodes(uids)
+        missing = [u for u in uids if u not in found]
+        if missing:
+            raise NodeNotFound(f"No node with uid {missing[0]!r}")
+        targets = [found[u] for u in uids]
+        seed_owner = {u: u for u in uids}
+        for t in targets:
+            if label_of(t) in ("Class", "File"):
+                # A change to a class/file also affects the members it defines.
+                for (m,) in self.q("MATCH (n:Entity {uid: $uid})-[:DEFINES*1..3]->(m) RETURN m.uid LIMIT 400", uid=t["uid"]):
+                    seed_owner.setdefault(m, t["uid"])
+        seeds = list(seed_owner)
 
-        result = bfs_impact(seeds, lambda fr: self._expand(fr, rels, reverse=True), depth)
-        info = self.nodes(list(result.keys()))
+        result, parents = bfs_impact_paths(seeds, lambda fr: self._expand_edges(fr, rels), depth)
+        info = self.nodes(list(result.keys()) + seeds)
+        for t in targets:
+            info.setdefault(t["uid"], t)
         impacted = []
         for u, meta in sorted(result.items(), key=lambda kv: (kv[1]["depth"], kv[0])):
             if u not in info:
                 continue
-            impacted.append({**brief(info[u]), **meta})
+            impacted.append({**brief(info[u]), **meta, "parents": parents.get(u, [])})
         files = Counter(n.get("path") for n in impacted if n.get("path"))
         conf = Counter(n["confidence"] for n in impacted)
+        from .impact import build_report
+        report = build_report(self, targets, seed_owner, depth, rels,
+                              {u: m for u, m in result.items() if u in info}, parents, info, self.ensure_exists())
         return {
-            "target": brief(target),
+            "target": brief(targets[0]),
+            "targets": [brief(t) for t in targets],
             "depth": depth,
             "rels": rels,
             "seed_count": len(seeds),
@@ -354,7 +377,66 @@ class GraphQueries:
             "affected_files": [{"path": p, "symbols": c} for p, c in files.most_common()],
             "by_confidence": dict(conf),
             "truncated": len(result) >= MAX_IMPACT_NODES,
+            "report": report,
         }
+
+    # -- read-only lookups used by the impact report (overridden by the in-memory test double) --
+    def _expand_edges(self, frontier: list[str], rels: list[str]) -> list[tuple]:
+        """Reverse expansion with edge props: (to, type, confidence, from, {lines, syntax, event})."""
+        rel_expr = "|".join(rels)
+        rows = self.q(f"UNWIND $frontier AS u MATCH (b:Entity {{uid: u}})<-[e:{rel_expr}]-(a:Entity) "
+                      "RETURN b.uid, type(e), e.confidence, a.uid, e.lines, e.line, e.syntax, e.event LIMIT $cap",
+                      frontier=frontier, cap=MAX_FRONTIER * 10)
+        return [(b, t, c, a, {"lines": lines or ([line] if line else None), "syntax": syn, "event": ev})
+                for b, t, c, a, lines, line, syn, ev in rows]
+
+    def repo_files(self) -> list[tuple]:
+        return [(p, lang) for p, lang in self.q("MATCH (f:File) RETURN f.path, f.language")]
+
+    def http_client_nodes(self, indexed_facts: bool) -> list[dict]:
+        """Functions that may send HTTP requests to this app's routes.
+
+        Graphs with indexed facts are queried on `http_calls`; older graphs are narrowed by
+        source text and parsed in Python (frameworks.*_from_source)."""
+        if indexed_facts:
+            rows = self.q("MATCH (n:Function) WHERE n.http_calls IS NOT NULL RETURN n LIMIT 500")
+        else:
+            rows = self.q("MATCH (n:Function) WHERE n.source CONTAINS 'fetch(' OR n.source CONTAINS 'axios.' "
+                          "OR n.source CONTAINS 'client.' RETURN n LIMIT 500")
+        return [r[0] for r in rows]
+
+    def layer_nodes(self, layer: str) -> list[dict]:
+        """Nodes whose membership of `layer` is confirmed by syntax (route decorator, JSX, model base,
+        external call…). Used to match concept words in impact scenarios. Read-only."""
+        from . import frameworks as F
+        from .impact import Facts
+        version = int(self.ensure_exists().get("graph_version") or 1)
+        facts = Facts(version)
+        out = []
+        for n in self._layer_candidates(layer, version >= 2):
+            if any(l["layer"] == layer and l["basis"] == "syntax" for l in F.classify(n, facts.of(n, [], None))):
+                out.append(n)
+        return sorted(out, key=lambda n: n["uid"])
+
+    def _layer_candidates(self, layer: str, indexed_facts: bool) -> list[dict]:
+        decorated = ("MATCH (n:Function) WHERE n.decorators IS NOT NULL RETURN n LIMIT 300" if indexed_facts else
+                     "MATCH (n:Function) WHERE n.language = 'python' AND n.source STARTS WITH '@' RETURN n LIMIT 300")
+        cypher = {
+            "HTTP route": decorated,
+            "Background job / event handler": decorated,
+            # Older graphs have no JSX facts: no component is *confirmed*, so none is offered.
+            "UI component": "MATCH (n:Entity) WHERE n.renders_jsx = true RETURN n LIMIT 300" if indexed_facts else None,
+            "Data model / schema": "MATCH (n:Class) RETURN n LIMIT 400",
+            "External service / database": "MATCH (n:Function) WHERE size(n.external_calls) > 0 RETURN n LIMIT 400",
+        }.get(layer)
+        if layer == "API client":
+            return self.http_client_nodes(indexed_facts)
+        return [r[0] for r in self.q(cypher)] if cypher else []
+
+    def upstream(self, uids: list[str], rels: list[str], depth: int) -> tuple[dict, dict, dict]:
+        """Dependents of `uids` (e.g. matched API clients), with the same bounds as impact."""
+        result, parents = bfs_impact_paths(uids, lambda fr: self._expand_edges(fr, rels), depth)
+        return result, parents, self.nodes(list(result) + list(uids))
 
 
 # --------------------------------------------------------------------------
@@ -394,18 +476,42 @@ def bfs_path(src: str, dst: str, expand: ExpandFn, max_depth: int) -> Optional[l
 def bfs_impact(seeds: list[str], expand_reverse: ExpandFn, max_depth: int) -> dict[str, dict]:
     """Reverse reachability. Each impacted node gets its minimum depth, the edge
     that reached it, and the weakest confidence along the best path found."""
+    return bfs_impact_paths(seeds, expand_reverse, max_depth)[0]
+
+
+def bfs_impact_paths(seeds: list[str], expand_reverse: ExpandFn, max_depth: int) -> tuple[dict[str, dict], dict[str, list]]:
+    """Like `bfs_impact`, and also every parent edge on the shortest-path DAG.
+
+    `parents[u]` lists each edge `u -[type]-> to` where `to` sits one level closer to the
+    seeds, so all callers and all shortest paths are kept. Each node is expanded once,
+    which bounds the work and makes cycles harmless. Rows may carry a 5th element with
+    edge props (lines, syntax, event)."""
     seed_set = set(seeds)
     best_rank = {s: 3 for s in seeds}
     out: dict[str, dict] = {}
+    parents: dict[str, list] = {}
     frontier = sorted(seed_set)
     for depth in range(1, max_depth + 1):
         level: dict[str, dict] = {}
-        for target, rel, conf, src in expand_reverse(frontier[:MAX_FRONTIER]):
+        level_parents: dict[str, list] = {}
+        for row in expand_reverse(frontier[:MAX_FRONTIER]):
+            target, rel, conf, src = row[:4]
+            props = row[4] if len(row) > 4 and row[4] else {}
             if src in seed_set:
                 continue
-            rank = min(best_rank.get(target, 3), CONF_RANK.get(conf, 1))
-            if src in out:                       # already reached at a shallower depth
+            edge = {"to": target, "type": rel, "confidence": conf or "resolved",
+                    **{k: v for k, v in props.items() if v not in (None, [], "")}}
+            if src in out:
+                # Already reached (at this depth or shallower): keep the edge as an alternative
+                # path (e.g. a route that calls the target directly *and* through a helper).
+                alt = parents.setdefault(src, [])
+                if not any(e["to"] == target and e["type"] == rel for e in alt):
+                    alt.append({**edge, "alt": True})
                 continue
+            bucket = level_parents.setdefault(src, [])
+            if not any(e["to"] == target and e["type"] == rel for e in bucket):
+                bucket.append(edge)
+            rank = min(best_rank.get(target, 3), CONF_RANK.get(conf, 1))
             cur = level.get(src)
             if cur is None or rank > cur["_rank"]:
                 level[src] = {"depth": depth, "via": rel, "from": target, "_rank": rank}
@@ -413,9 +519,10 @@ def bfs_impact(seeds: list[str], expand_reverse: ExpandFn, max_depth: int) -> di
             best_rank[u] = meta.pop("_rank")
             meta["confidence"] = RANK_CONF[best_rank[u]]
             out[u] = meta
+            parents[u] = sorted(level_parents[u], key=lambda e: (e["to"], e["type"])) + parents.get(u, [])
             if len(out) >= MAX_IMPACT_NODES:
-                return out
+                return out, parents
         if not level:
             break
         frontier = sorted(level)
-    return out
+    return out, parents

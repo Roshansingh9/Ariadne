@@ -92,6 +92,9 @@ def node_rows(graph: CodeGraph) -> dict[str, list[dict]]:
                 "line_end": s.line_end, "signature": s.signature, "docstring": s.docstring,
                 "source": s.source, "unresolved_calls": s.unresolved_calls,
                 "external_calls": s.external_calls,
+                **({"decorators": s.decorators} if s.decorators else {}),
+                **({"http_calls": s.http_calls} if s.http_calls else {}),
+                **({"renders_jsx": True} if s.renders_jsx else {}),
             })
     for uid in sorted(graph.packages):
         p = graph.packages[uid]

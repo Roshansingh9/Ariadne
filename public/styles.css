@@ -160,6 +160,51 @@ dialog h2 { margin: 0 0 8px; font-size: 16px; }
 .notice.strong { border-left-width: 4px; background: color-mix(in srgb, var(--warn) 14%, transparent); font-size: 13px; }
 .answer.incomplete { border-style: dashed; border-color: var(--warn); }
 .evidence li.uncited { opacity: .62; }
+/* Impact report */
+.imp-label { display: block; font-weight: 600; margin: 6px 0 4px; }
+#impact-scenario { width: 100%; resize: vertical; }
+.imp-examples { margin: 6px 0; }
+.chip-btn { font-size: 11.5px; padding: 3px 8px; border-radius: 999px; text-align: left; white-space: normal; }
+.imp-actions { align-items: flex-start; flex-wrap: wrap; }
+.imp-advanced summary, .imp-symbol summary { cursor: pointer; font-size: 12.5px; color: var(--muted); }
+.imp-advanced[open] { flex-basis: 100%; } .imp-advanced label { display: block; margin: 4px 0; }
+.imp-symbol { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 8px; }
+.scenario-text { border-left: 3px solid var(--accent); padding: 4px 8px; background: var(--soft); border-radius: 4px; }
+.targets .target-row { display: flex; gap: 8px; align-items: flex-start; padding: 6px 0; border-bottom: 1px dashed var(--line); }
+.target-body { min-width: 0; flex: 1; }
+.conf-badge { font-size: 10.5px; padding: 1px 6px; border-radius: 5px; border: 1px solid var(--line); }
+.conf-badge.high { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 55%, transparent); }
+.conf-badge.medium { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 55%, transparent); }
+.conf-badge.low { color: var(--muted); border-style: dashed; }
+.impact-selected { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; margin-bottom: 8px; background: var(--soft); }
+.impact-sel-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.impact-picker { margin-bottom: 6px; } .impact-picker input { width: 100%; }
+.imp-sec h4 { font-size: 12px; margin: 10px 0 4px; }
+.node { display: inline-flex; flex-direction: column; line-height: 1.2; }
+.where { font-family: var(--mono); font-size: 10.5px; color: var(--muted); overflow-wrap: anywhere; }
+.imp-files { list-style: none; padding: 0; margin: 4px 0; } .imp-files > li { padding: 5px 0; border-bottom: 1px dashed var(--line); }
+.coverage-line { margin-top: 4px; }
+.imp-sec { margin: 10px 0 14px; } .imp-sec h3 { margin: 0 0 6px; } h3.inline { display: inline; }
+.imp-head { display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; }
+.imp-stats { margin: 8px 0 6px; }
+.chips { display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0; }
+.layer, .basis, .kind { font-size: 10.5px; padding: 1px 6px; border-radius: 5px; border: 1px solid var(--line); white-space: nowrap; }
+.layer.confirmed, .basis.confirmed { border-color: color-mix(in srgb, var(--ok) 55%, transparent); color: var(--ok); }
+.layer.inferred, .basis.inferred { border-style: dashed; border-color: color-mix(in srgb, var(--warn) 60%, transparent); color: var(--warn); }
+.basis.caveat { color: var(--muted); }
+.kind.direct { color: var(--accent); } .kind.transitive { color: var(--muted); }
+.imp-group { border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; margin: 6px 0; }
+.imp-group > summary { cursor: pointer; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.imp-path { padding: 5px 0; border-top: 1px dashed var(--line); }
+.imp-path:first-of-type { border-top: 0; }
+.chain { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 4px; margin-top: 3px; overflow-wrap: anywhere; }
+.sym { color: var(--accent); cursor: pointer; font-family: var(--mono); font-size: 12px; overflow-wrap: anywhere; }
+.sym:hover { text-decoration: underline; } .sym.target { font-weight: 700; color: var(--ink); }
+.arrow { color: var(--muted); font-size: 11px; white-space: nowrap; }
+.arrow.inferred { color: var(--warn); border-bottom: 1px dashed var(--warn); }
+.imp-list { list-style: none; padding: 0; margin: 4px 0; } .imp-list li { margin: 4px 0; overflow-wrap: anywhere; }
+.notice.ok { border-left-color: var(--ok); background: color-mix(in srgb, var(--ok) 7%, transparent); }
+.notice.muted { border-left-color: var(--line); background: var(--soft); color: var(--muted); }
 .depth { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; margin: 10px 0 2px; }
 
 @media (max-width: 1200px) {
